@@ -1,0 +1,195 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function myRoleDocId() {
+      return request.auth.token.email.lower().replace('[^a-z0-9]', '_');
+    }
+
+    function isBootstrappedAdmin() {
+      return isVerifiedUser()
+        && request.auth.token.email != null
+        && request.auth.token.email.lower() == 'jianmaulana44@admin.smk.belajar.id';
+    }
+
+    function hasStaffRole(roleName) {
+      return isVerifiedUser()
+        && request.auth.token.email != null
+        && exists(/databases/$(database)/documents/staff_roles/$(myRoleDocId()))
+        && get(/databases/$(database)/documents/staff_roles/$(myRoleDocId())).data.role == roleName;
+    }
+
+    function isAdmin() {
+      return isBootstrappedAdmin() || hasStaffRole('admin');
+    }
+
+    function isStaff() {
+      return isAdmin() || hasStaffRole('piket');
+    }
+
+    function isValidPengaturan(data) {
+      return data.keys().hasAll([
+          'nama_sekolah', 'alamat_sekolah', 'kepala_sekolah', 'nip_kepsek',
+          'jam_masuk', 'batas_terlambat', 'jam_pulang', 'logo', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'nama_sekolah', 'alamat_sekolah', 'kepala_sekolah', 'nip_kepsek',
+          'jam_masuk', 'batas_terlambat', 'jam_pulang', 'logo', 'updatedAt'
+        ])
+        && data.nama_sekolah is string && data.nama_sekolah.size() >= 2 && data.nama_sekolah.size() <= 150
+        && data.alamat_sekolah is string && data.alamat_sekolah.size() >= 2 && data.alamat_sekolah.size() <= 400
+        && data.kepala_sekolah is string && data.kepala_sekolah.size() >= 2 && data.kepala_sekolah.size() <= 120
+        && data.nip_kepsek is string && data.nip_kepsek.size() <= 50
+        && data.jam_masuk is string && data.jam_masuk.size() == 8 && data.jam_masuk.matches('^\\d{2}:\\d{2}:\\d{2}$')
+        && data.batas_terlambat is string && data.batas_terlambat.size() == 8 && data.batas_terlambat.matches('^\\d{2}:\\d{2}:\\d{2}$')
+        && data.jam_pulang is string && data.jam_pulang.size() == 8 && data.jam_pulang.matches('^\\d{2}:\\d{2}:\\d{2}$')
+        && data.logo is string && data.logo.size() <= 250000
+        && data.updatedAt == request.time;
+    }
+
+    function isValidStaffRole(data) {
+      return data.keys().hasAll(['email', 'nama_lengkap', 'role', 'createdByUid', 'createdAt'])
+        && data.keys().hasOnly(['email', 'nama_lengkap', 'role', 'createdByUid', 'createdAt'])
+        && data.email is string && data.email.size() >= 5 && data.email.size() <= 150
+        && data.nama_lengkap is string && data.nama_lengkap.size() >= 2 && data.nama_lengkap.size() <= 120
+        && data.role in ['admin', 'piket']
+        && data.createdByUid is string && data.createdByUid.size() >= 1 && data.createdByUid.size() <= 128
+        && data.createdAt is timestamp;
+    }
+
+    function isValidSiswa(data) {
+      return data.keys().hasAll([
+          'nis', 'nisn', 'nama_siswa', 'jenis_kelamin', 'kelas',
+          'jurusan', 'no_hp_ortu', 'foto', 'status_aktif', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'nis', 'nisn', 'nama_siswa', 'jenis_kelamin', 'kelas',
+          'jurusan', 'no_hp_ortu', 'foto', 'status_aktif', 'updatedAt'
+        ])
+        && isValidId(data.nis) && data.nis.size() <= 30
+        && data.nisn is string && data.nisn.size() <= 30
+        && data.nama_siswa is string && data.nama_siswa.size() >= 1 && data.nama_siswa.size() <= 120
+        && data.jenis_kelamin in ['L', 'P']
+        && data.kelas in ['X', 'XI', 'XII']
+        && data.jurusan is string && data.jurusan.size() >= 1 && data.jurusan.size() <= 60
+        && data.no_hp_ortu is string && data.no_hp_ortu.size() <= 25
+        && data.foto is string && data.foto.size() <= 250000
+        && data.status_aktif in ['aktif', 'lulus', 'keluar']
+        && data.updatedAt == request.time;
+    }
+
+    function isValidAbsensi(data) {
+      return data.keys().hasAll([
+          'nis', 'nama_siswa', 'kelas', 'jurusan', 'foto', 'tanggal',
+          'jam_masuk', 'jam_pulang', 'status', 'keterangan',
+          'petugas_piket', 'recordedByUid', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'nis', 'nama_siswa', 'kelas', 'jurusan', 'foto', 'tanggal',
+          'jam_masuk', 'jam_pulang', 'status', 'keterangan',
+          'petugas_piket', 'recordedByUid', 'updatedAt'
+        ])
+        && isValidId(data.nis) && data.nis.size() <= 30
+        && data.nama_siswa is string && data.nama_siswa.size() >= 1 && data.nama_siswa.size() <= 120
+        && data.kelas is string && data.kelas.size() >= 1 && data.kelas.size() <= 10
+        && data.jurusan is string && data.jurusan.size() >= 1 && data.jurusan.size() <= 60
+        && data.foto is string && data.foto.size() <= 250000
+        && data.tanggal is string && data.tanggal.size() == 10 && data.tanggal.matches('^\\d{4}-\\d{2}-\\d{2}$')
+        && data.jam_masuk is string && data.jam_masuk.size() <= 8
+        && data.jam_pulang is string && data.jam_pulang.size() <= 8
+        && data.status in ['Hadir', 'Terlambat', 'Izin', 'Sakit', 'Alpa']
+        && data.keterangan is string && data.keterangan.size() <= 255
+        && data.petugas_piket is string && data.petugas_piket.size() >= 1 && data.petugas_piket.size() <= 120
+        && data.recordedByUid == request.auth.uid
+        && data.updatedAt == request.time;
+    }
+
+    match /test/connection {
+      allow get: if isSignedIn();
+    }
+
+    match /pengaturan/{settingId} {
+      allow get: if settingId == 'main' || (isValidId(settingId) && isStaff());
+      allow create, update: if isValidId(settingId) && isAdmin() && isValidPengaturan(incoming());
+    }
+
+    match /staff_roles/{roleId} {
+      allow get: if isValidId(roleId) && isVerifiedUser() && (roleId == myRoleDocId() || isAdmin());
+      allow list: if isAdmin();
+      allow create: if isValidId(roleId)
+        && isAdmin()
+        && isValidStaffRole(incoming())
+        && incoming().createdByUid == request.auth.uid
+        && incoming().createdAt == request.time;
+      allow update: if isValidId(roleId)
+        && isAdmin()
+        && isValidStaffRole(incoming())
+        && incoming().createdByUid == existing().createdByUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().diff(existing()).affectedKeys().hasOnly(['nama_lengkap', 'role']);
+      allow delete: if isValidId(roleId) && isAdmin();
+    }
+
+    match /siswa/{siswaId} {
+      allow get: if isValidId(siswaId) && isStaff();
+      allow list: if isStaff();
+      allow create: if isValidId(siswaId)
+        && siswaId == incoming().nis
+        && isAdmin()
+        && isValidSiswa(incoming());
+      allow update: if isValidId(siswaId)
+        && isAdmin()
+        && isValidSiswa(incoming())
+        && incoming().nis == existing().nis
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'nisn', 'nama_siswa', 'jenis_kelamin', 'kelas', 'jurusan',
+          'no_hp_ortu', 'foto', 'status_aktif', 'updatedAt'
+        ]);
+      allow delete: if isValidId(siswaId) && isAdmin();
+    }
+
+    match /absensi/{absensiId} {
+      allow get: if isValidId(absensiId) && isStaff();
+      allow list: if isStaff();
+      allow create: if isValidId(absensiId)
+        && absensiId == (incoming().tanggal + '_' + incoming().nis)
+        && isStaff()
+        && isValidAbsensi(incoming())
+        && exists(/databases/$(database)/documents/siswa/$(incoming().nis));
+      allow update: if isValidId(absensiId)
+        && isStaff()
+        && isValidAbsensi(incoming())
+        && incoming().nis == existing().nis
+        && incoming().tanggal == existing().tanggal
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'jam_masuk', 'jam_pulang', 'status', 'keterangan',
+          'petugas_piket', 'recordedByUid', 'updatedAt'
+        ]);
+      allow delete: if isValidId(absensiId) && isAdmin();
+    }
+  }
+}

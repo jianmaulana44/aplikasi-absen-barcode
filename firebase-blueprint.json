@@ -1,0 +1,126 @@
+{
+  "entities": {
+    "Pengaturan": {
+      "title": "Pengaturan Sekolah",
+      "description": "Konfigurasi identitas sekolah dan jam absensi SMK Putra Gununghalu.",
+      "type": "object",
+      "properties": {
+        "nama_sekolah": { "type": "string", "minLength": 2, "maxLength": 150 },
+        "alamat_sekolah": { "type": "string", "minLength": 2, "maxLength": 400 },
+        "kepala_sekolah": { "type": "string", "minLength": 2, "maxLength": 120 },
+        "nip_kepsek": { "type": "string", "maxLength": 50 },
+        "jam_masuk": { "type": "string", "pattern": "^\\d{2}:\\d{2}:\\d{2}$" },
+        "batas_terlambat": { "type": "string", "pattern": "^\\d{2}:\\d{2}:\\d{2}$" },
+        "jam_pulang": { "type": "string", "pattern": "^\\d{2}:\\d{2}:\\d{2}$" },
+        "logo": { "type": "string", "maxLength": 250000 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "nama_sekolah",
+        "alamat_sekolah",
+        "kepala_sekolah",
+        "nip_kepsek",
+        "jam_masuk",
+        "batas_terlambat",
+        "jam_pulang",
+        "logo",
+        "updatedAt"
+      ]
+    },
+    "StaffRole": {
+      "title": "Akun Staf & Guru Piket",
+      "description": "Daftar pengguna berwenang (Administrator dan Guru Piket) berdasarkan email Google terverifikasi.",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string", "minLength": 5, "maxLength": 150 },
+        "nama_lengkap": { "type": "string", "minLength": 2, "maxLength": 120 },
+        "role": { "type": "string", "enum": ["admin", "piket"] },
+        "createdByUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["email", "nama_lengkap", "role", "createdByUid", "createdAt"]
+    },
+    "Siswa": {
+      "title": "Data Siswa",
+      "description": "Profil siswa SMK Putra Gununghalu dengan NIS sebagai identitas QR Code.",
+      "type": "object",
+      "properties": {
+        "nis": { "type": "string", "minLength": 1, "maxLength": 30, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "nisn": { "type": "string", "maxLength": 30 },
+        "nama_siswa": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "jenis_kelamin": { "type": "string", "enum": ["L", "P"] },
+        "kelas": { "type": "string", "enum": ["X", "XI", "XII"] },
+        "jurusan": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "no_hp_ortu": { "type": "string", "maxLength": 25 },
+        "foto": { "type": "string", "maxLength": 250000 },
+        "status_aktif": { "type": "string", "enum": ["aktif", "lulus", "keluar"] },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "nis",
+        "nisn",
+        "nama_siswa",
+        "jenis_kelamin",
+        "kelas",
+        "jurusan",
+        "no_hp_ortu",
+        "foto",
+        "status_aktif",
+        "updatedAt"
+      ]
+    },
+    "Absensi": {
+      "title": "Catatan Absensi Harian",
+      "description": "Catatan scan masuk/pulang dan status izin/sakit/alpa siswa per tanggal.",
+      "type": "object",
+      "properties": {
+        "nis": { "type": "string", "minLength": 1, "maxLength": 30, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "nama_siswa": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "kelas": { "type": "string", "minLength": 1, "maxLength": 10 },
+        "jurusan": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "foto": { "type": "string", "maxLength": 250000 },
+        "tanggal": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "jam_masuk": { "type": "string", "maxLength": 8 },
+        "jam_pulang": { "type": "string", "maxLength": 8 },
+        "status": { "type": "string", "enum": ["Hadir", "Terlambat", "Izin", "Sakit", "Alpa"] },
+        "keterangan": { "type": "string", "maxLength": 255 },
+        "petugas_piket": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "recordedByUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "nis",
+        "nama_siswa",
+        "kelas",
+        "jurusan",
+        "foto",
+        "tanggal",
+        "jam_masuk",
+        "jam_pulang",
+        "status",
+        "keterangan",
+        "petugas_piket",
+        "recordedByUid",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/pengaturan/{settingId}": {
+      "schema": { "$ref": "#/entities/Pengaturan" },
+      "description": "Pengaturan tunggal sekolah pada dokumen /pengaturan/main."
+    },
+    "/staff_roles/{roleId}": {
+      "schema": { "$ref": "#/entities/StaffRole" },
+      "description": "Hak akses peran admin dan piket berbasis email terverifikasi."
+    },
+    "/siswa/{siswaId}": {
+      "schema": { "$ref": "#/entities/Siswa" },
+      "description": "Master data siswa dengan dokumen ID sama dengan NIS siswa."
+    },
+    "/absensi/{absensiId}": {
+      "schema": { "$ref": "#/entities/Absensi" },
+      "description": "Log kehadiran harian dengan dokumen ID berformat YYYY-MM-DD_NIS."
+    }
+  }
+}

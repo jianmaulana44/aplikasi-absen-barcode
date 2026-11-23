@@ -1,0 +1,91 @@
+Bertindaklah sebagai Senior Full-Stack Web Developer (PHP Native, MySQL, Bootstrap 5, JavaScript). 
+Tugasmu adalah membangun aplikasi web Sistem Informasi Absensi Siswa Berbasis Barcode/QR Code yang berjalan 100% secara LOKAL (Intranet/LAN tanpa internet) untuk "SMK PUTRA GUNUNGHALU".
+
+================================================================
+1. SPESIFIKASI TEKNIS & ARSITEKTUR OFFLINE
+================================================================
+- Tech Stack: PHP 8+ (PDO atau MySQLi dengan Prepared Statements untuk keamanan), MySQL/MariaDB, HTML5, CSS3, Bootstrap 5, dan Vanilla JavaScript.
+- Deployment Lokal: Aplikasi akan di-install di komputer server kantor (Windows menggunakan Laragon) dan diakses oleh HP Guru Piket melalui Wi-Fi lokal yang sama (IP Lokal, misal: https://192.168.1.100/absen-smk).
+- Sifat 100% Offline: Jangan bergantung pada CDN online untuk operasional utama (atau berikan instruksi/link file aset lokal seperti `bootstrap.min.css`, `bootstrap.bundle.min.js`, `html5-qrcode.min.js`, `xlsx.full.min.js`, dan `qrcode.min.js` yang ditaruh di folder `assets/`).
+- Akses Kamera HP: Sertakan panduan singkat mengaktifkan SSL Lokal (HTTPS) di Laragon agar browser HP (Chrome/Safari) tidak memblokir akses kamera saat membuka alamat IP lokal.
+
+================================================================
+2. STRUKTUR FOLDER PROYEK
+================================================================
+Gunakan struktur folder berikut secara konsisten di semua file (perhatikan relative path `../`):
+absen-smk/
+├── config/
+│   └── koneksi.php          # Koneksi DB, session_start(), date_default_timezone_set('Asia/Jakarta')
+├── auth/
+│   ├── login.php            # Halaman login Admin & Guru Piket
+│   └── logout.php           # Destroy session
+├── admin/
+│   ├── header.php           # Template Navbar/Sidebar & load CSS Bootstrap lokal
+│   ├── footer.php           # Template Footer & load JS Bootstrap lokal
+│   ├── dashboard.php        # Statistik harian, grafik, & tabel log scan real-time
+│   ├── siswa.php            # CRUD manual, Upload Foto, Download Template Excel, Import Excel
+│   ├── kartu.php            # Generator Kartu Absen & QR Code otomatis + Print Layout A4
+│   ├── rekap.php            # Rekapitulasi Harian, Mingguan, Bulanan (Matriks Tgl 1-31) + Export Excel
+│   └── pengaturan.php       # Setting Jam Masuk, Batas Terlambat, Jam Pulang, Kepsek, & Akun User
+├── piket/
+│   └── scan.php             # UI Mobile-First khusus HP Guru Piket untuk Scan Barcode/QR
+├── api/
+│   ├── proses_absen.php     # Endpoint JSON untuk memproses scan Masuk/Pulang & hitung keterlambatan
+│   └── input_manual.php     # Endpoint JSON untuk input cepat Izin/Sakit/Tanpa Kartu oleh Guru Piket
+├── assets/
+│   ├── css/                 # bootstrap.min.css, bootstrap-icons.css
+│   ├── js/                  # bootstrap.bundle.min.js, html5-qrcode.min.js, xlsx.full.min.js, qrcode.min.js
+│   ├── audio/               # beep-success.mp3, beep-error.mp3 (atau gunakan Web Audio API generator agar tanpa file mp3!)
+│   └── uploads/             # Folder foto siswa & logo_smk.png
+└── index.php                # Cek session & redirect otomatis (admin -> admin/dashboard.php, piket -> piket/scan.php)
+
+================================================================
+3. SKEMA DATABASE MYSQL (`db_absen_smk`)
+================================================================
+Buat skema database berikut:
+1. `users`: id_user (PK), nama_lengkap, username (UNIQUE), password (hashed), role ENUM('admin','piket'), created_at. (Sertakan akun default: admin/admin123 dan piket/piket123).
+2. `pengaturan`: id (PK=1), nama_sekolah ('SMK PUTRA GUNUNGHALU'), alamat_sekolah, kepala_sekolah, nip_kepsek, jam_masuk (TIME, default '07:00:00'), batas_terlambat (TIME, default '07:15:00'), jam_pulang (TIME, default '15:00:00').
+3. `siswa`: id_siswa (PK), nis (VARCHAR UNIQUE), nisn, nama_siswa, jenis_kelamin ENUM('L','P'), kelas (misal: X, XI, XII), jurusan (misal: TKJ, RPL, TKR, OTKP), no_hp_ortu, foto (default 'default.png'), status_aktif ENUM('aktif','lulus','keluar').
+4. `absensi`: id_absen (PK), id_siswa (FK), tanggal (DATE), jam_masuk (TIME NULL), jam_pulang (TIME NULL), status ENUM('Hadir','Terlambat','Izin','Sakit','Alpa'), keterangan, petugas_piket. (Buat UNIQUE KEY pada `id_siswa, tanggal`).
+
+================================================================
+4. DETAIL FITUR WAJIB PER HALAMAN
+================================================================
+A. Halaman Scanner HP Guru Piket (`piket/scan.php` & `api/proses_absen.php`):
+   - Desain Mobile-First (tombol besar, ringan, responsif di layar HP).
+   - Menggunakan library `html5-qrcode` untuk mengakses kamera belakang HP (`facingMode: "environment"`).
+   - Pilihan Mode: **Otomatis** (jika jam sekarang < jam_pulang maka Absen Masuk, jika >= jam_pulang maka Absen Pulang), atau bisa diklik manual (**Mode Masuk** / **Mode Pulang**).
+   - Logika Absen Masuk: Cek jam saat ini vs `batas_terlambat` di tabel `pengaturan`. Jika lewat batas, status otomatis = `'Terlambat'`, jika tidak = `'Hadir'`. Cegah scan ganda di hari yang sama.
+   - Efek Suara: Gunakan **Web Audio API (JavaScript Oscillator)** untuk menghasilkan suara *beep* sukses (nada tinggi) dan *beep* gagal/sudah absen (nada rendah) tanpa perlu file MP3 eksternal.
+   - Feedback Visual: Tampilkan kartu pop-up/modal sesaat berisi Foto Siswa, Nama, Kelas/Jurusan, Jam Scan, dan Badge Status (Hadir/Terlambat) agar guru piket bisa memverifikasi wajah siswa.
+   - Fitur Darurat Pagi: Tab/Modal pencarian nama/NIS siswa untuk input manual jika siswa lupa membawa kartu, atau mencatat siswa yang **Sakit / Izin** di pagi hari.
+
+B. Halaman Data Siswa & Import Excel (`admin/siswa.php`):
+   - Tabel data siswa dengan pencarian dan filter per Kelas & Jurusan.
+   - Modal Tambah & Edit Siswa (termasuk upload & preview foto siswa).
+   - Tombol **"Download Template Excel (.xlsx)"**: Menggunakan SheetJS (`xlsx.full.min.js`) di browser untuk langsung men-generate file Excel berisi header kolom (`NIS`, `NISN`, `NAMA_SISWA`, `JK`, `KELAS`, `JURUSAN`, `NO_HP_ORTU`) beserta 2 baris contoh data agar operator sekolah tidak salah format.
+   - Tombol **"Upload / Import Excel"**: Membaca file `.xlsx/.xls` via SheetJS lalu mengirim array JSON via `fetch()` ke PHP untuk disimpan massal ke MySQL (gunakan `INSERT IGNORE` atau `ON DUPLICATE KEY UPDATE` berdasarkan NIS agar aman jika ada data ganda).
+
+C. Halaman Pembuat Kartu Absen Otomatis (`admin/kartu.php`):
+   - Filter siswa berdasarkan Kelas/Jurusan atau pilih semua.
+   - Desain Kartu Pelajar / Kartu Absen resmi **SMK PUTRA GUNUNGHALU** (ukuran standar ID Card CR80: 85.6mm x 54mm) berisi: Header Sekolah & Logo, Foto Siswa, Nama, NIS, Kelas/Jurusan, dan **QR Code** (yang berisi nilai `NIS` siswa, di-generate otomatis dengan `qrcode.min.js`).
+   - Tersedia tombol **"Cetak Kartu (Print)"** dengan CSS `@media print` khusus yang menyembunyikan navbar/tombol dan menata kartu secara presisi dalam grid kertas A4 siap potong.
+
+D. Halaman Rekap Kehadiran (`admin/rekap.php`):
+   - Filter berdasarkan periode: **Harian**, **Mingguan** (pilih tanggal awal-akhir), dan **Bulanan** (pilih Bulan & Tahun), serta filter **Kelas & Jurusan**.
+   - Untuk tampilan **Bulanan**, tampilkan tabel matriks tanggal 1 sampai 31 dengan kode warna ringkas (`H` = Hijau, `T` = Kuning/Oranye, `I` = Biru, `S` = Ungu, `A` = Merah) serta kolom total jumlah H, T, I, S, A di bagian kanan.
+   - Fitur tombol **"Generate Alpa Otomatis"** untuk menandai siswa aktif yang belum memiliki catatan absen pada tanggal tertentu menjadi `Alpa`.
+   - Tombol **"Export ke Excel (.xlsx)"** menggunakan SheetJS langsung dari tabel laporan yang sedang tampil.
+
+E. Halaman Dashboard (`admin/dashboard.php`) & Pengaturan (`admin/pengaturan.php`):
+   - Dashboard menampilkan 4-5 Card ringkasan hari ini (Total Siswa Aktif, Hadir, Terlambat, Izin/Sakit, Belum Hadir) dan tabel *Live Log* 15 siswa terakhir yang melakukan scan.
+   - Pengaturan untuk mengubah identitas sekolah, nama kepala sekolah, jam masuk, batas terlambat, jam pulang, serta tambah/hapus akun Guru Piket.
+
+================================================================
+5. ATURAN OUTPUT KODE (PENTING!)
+================================================================
+- Tuliskan kode secara LENGKAP untuk setiap file (JANGAN disingkat dengan komentar `// ... kode lainnya ...` atau `// TODO`).
+- Pastikan semua query SQL aman dari SQL Injection, dan semua output HTML diamankan dengan `htmlspecialchars()`.
+- Karena total kode cukup panjang, bagi jawabanmu menjadi **2 Tahap** agar tidak terpotong batas token:
+  - **JAWABAN SEKARANG (TAHAP 1):** Berikan Panduan Setup Offline (daftar file library lokal yang harus diunduh + cara aktifkan HTTPS di Laragon), Skema Database SQL lengkap, `config/koneksi.php`, `index.php`, `auth/login.php`, `auth/logout.php`, `piket/scan.php`, `api/proses_absen.php`, dan `api/input_manual.php`.
+  - Setelah selesai Tahap 1, berhenti dan tanyakan kepada saya apakah siap lanjut ke **TAHAP 2** (seluruh file folder `admin/`: `header.php`, `footer.php`, `dashboard.php`, `siswa.php`, `kartu.php`, `rekap.php`, dan `pengaturan.php`).

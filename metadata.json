@@ -1,0 +1,6 @@
+{
+  "name": "Sistem Absensi QR — SMK Putra Gununghalu",
+  "description": "Sistem Informasi Absensi Siswa Berbasis Barcode/QR Code untuk SMK Putra Gununghalu dengan Scanner Mobile-First, Kartu Pelajar QR, Import/Export Excel, dan Rekap Matriks Bulanan.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
