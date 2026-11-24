@@ -129,6 +129,30 @@ function AppContent() {
     return () => unsubSettings();
   }, []);
 
+  useEffect(() => {
+    if (!pengaturan) return;
+    if (pengaturan.nama_sekolah) {
+      document.title = `Sistem Absensi QR — ${pengaturan.nama_sekolah}`;
+    }
+    if (pengaturan.logo) {
+      const iconLink = document.querySelector<HTMLLinkElement>('link[rel="icon"]');
+      if (iconLink) {
+        iconLink.href = pengaturan.logo;
+        if (pengaturan.logo.startsWith('data:image/jpeg')) {
+          iconLink.type = 'image/jpeg';
+        } else if (pengaturan.logo.startsWith('data:image/png')) {
+          iconLink.type = 'image/png';
+        } else {
+          iconLink.removeAttribute('type');
+        }
+      }
+      const touchLink = document.querySelector<HTMLLinkElement>('link[rel="apple-touch-icon"]');
+      if (touchLink) {
+        touchLink.href = pengaturan.logo;
+      }
+    }
+  }, [pengaturan]);
+
   async function handleResendVerification(): Promise<void> {
     if (!auth.currentUser) return;
     await sendEmailVerification(auth.currentUser);

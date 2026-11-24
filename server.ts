@@ -1,6 +1,10 @@
+import 'dotenv/config';
+import { execFile } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
+import { promisify } from 'node:util';
 import express, { NextFunction, Request, Response } from 'express';
 import multer from 'multer';
 import { createServer as createViteServer } from 'vite';
@@ -1004,13 +1008,784 @@ app.delete('/api/users/:id', requireAuth, requireAdmin, (req: AuthedRequest, res
 });
 
 // ==========================================
+// FIREBASE TOKEN VERIFICATION & WHATSAPP PROXY
+// ==========================================
+
+const BOOTSTRAPPED_ADMIN_EMAIL = 'jianmaulana44@admin.smk.belajar.id';
+
+interface FirebaseAppletConfig {
+  projectId: string;
+  firestoreDatabaseId: string;
+}
+
+const firebaseAppletConfig: FirebaseAppletConfig = (() => {
+  try {
+    const raw = fs.readFileSync(path.resolve(process.cwd(), 'firebase-applet-config.json'), 'utf8');
+    return JSON.parse(raw) as FirebaseAppletConfig;
+  } catch {
+    return { projectId: '', firestoreDatabaseId: '(default)' };
+  }
+})();
+
+let cachedGoogleCerts: { certs: Record<string, string>; expiresAt: number } | null = null;
+
+async function getFirebasePublicCerts(): Promise<Record<string, string>> {
+  const now = Date.now();
+  if (cachedGoogleCerts && now < cachedGoogleCerts.expiresAt) {
+    return cachedGoogleCerts.certs;
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 5000);
+  try {
+    const resp = await fetch(
+      'https://www.googleapis.com/robot/v1/metadata/x509/securetoken@system.gserviceaccount.com',
+      { signal: controller.signal }
+    );
+    if (!resp.ok) {
+      throw new Error(`HTTP ${resp.status}`);
+    }
+    const cacheHeader = resp.headers.get('cache-control') || '';
+    const maxAgeMatch = /max-age=(\d+)/i.exec(cacheHeader);
+    const maxAgeSec = maxAgeMatch ? Number(maxAgeMatch[1]) : 3600;
+    const certs = (await resp.json()) as Record<string, string>;
+    cachedGoogleCerts = {
+      certs,
+      expiresAt: now + Math.max(60, maxAgeSec) * 1000,
+    };
+    return certs;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+interface VerifiedFirebaseUser {
+  uid: string;
+  email: string;
+  role: 'admin' | 'piket';
+  idToken: string;
+}
+
+interface FirebaseAuthedRequest extends Request {
+  firebaseUser?: VerifiedFirebaseUser;
+}
+
+async function verifyFirebaseIdToken(idToken: string): Promise<{
+  uid: string;
+  email: string;
+}> {
+  if (!firebaseAppletConfig.projectId) {
+    throw new Error('Konfigurasi proyek Firebase belum tersedia di server.');
+  }
+  const parts = idToken.split('.');
+  if (parts.length !== 3) {
+    throw new Error('Format token Firebase tidak valid.');
+  }
+  const [encodedHeader, encodedPayload, encodedSig] = parts;
+  const header = JSON.parse(Buffer.from(encodedHeader, 'base64url').toString('utf8')) as {
+    alg?: string;
+    kid?: string;
+  };
+  const payload = JSON.parse(Buffer.from(encodedPayload, 'base64url').toString('utf8')) as {
+    aud?: string;
+    iss?: string;
+    sub?: string;
+    exp?: number;
+    iat?: number;
+    email?: string;
+    email_verified?: boolean;
+  };
+
+  if (header.alg !== 'RS256' || typeof header.kid !== 'string') {
+    throw new Error('Header token Firebase tidak valid.');
+  }
+  const certs = await getFirebasePublicCerts();
+  const cert = certs[header.kid];
+  if (!cert) {
+    throw new Error('Sertifikat penanda tangan token Firebase tidak ditemukan.');
+  }
+
+  const verifier = crypto.createVerify('RSA-SHA256');
+  verifier.update(`${encodedHeader}.${encodedPayload}`);
+  const signature = Buffer.from(encodedSig, 'base64url');
+  if (!verifier.verify(cert, signature)) {
+    throw new Error('Tanda tangan token Firebase tidak sah.');
+  }
+
+  const nowSec = Math.floor(Date.now() / 1000);
+  const expectedIssuer = `https://securetoken.google.com/${firebaseAppletConfig.projectId}`;
+  if (
+    payload.aud !== firebaseAppletConfig.projectId ||
+    payload.iss !== expectedIssuer ||
+    typeof payload.sub !== 'string' ||
+    !payload.sub ||
+    typeof payload.exp !== 'number' ||
+    payload.exp <= nowSec ||
+    typeof payload.iat !== 'number' ||
+    payload.iat > nowSec + 60
+  ) {
+    throw new Error('Token Firebase kedaluwarsa atau tidak cocok dengan proyek.');
+  }
+
+  if (payload.email_verified !== true || typeof payload.email !== 'string' || !payload.email) {
+    throw new Error('Email akun belum terverifikasi.');
+  }
+
+  return { uid: payload.sub, email: payload.email.trim().toLowerCase() };
+}
+
+async function resolveFirebaseStaffRole(
+  email: string,
+  idToken: string
+): Promise<'admin' | 'piket' | null> {
+  if (email === BOOTSTRAPPED_ADMIN_EMAIL) {
+    return 'admin';
+  }
+  const roleDocId = email.replace(/[^a-z0-9]/g, '_');
+  const dbId = encodeURIComponent(firebaseAppletConfig.firestoreDatabaseId || '(default)');
+  const docUrl = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(
+    firebaseAppletConfig.projectId
+  )}/databases/${dbId}/documents/staff_roles/${encodeURIComponent(roleDocId)}`;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 5000);
+  try {
+    const resp = await fetch(docUrl, {
+      headers: { Authorization: `Bearer ${idToken}` },
+      signal: controller.signal,
+    });
+    if (!resp.ok) {
+      if (resp.status !== 404) {
+        console.error(`Firestore staff_roles lookup returned HTTP ${resp.status}`);
+      }
+      return null;
+    }
+    const data = (await resp.json()) as {
+      fields?: { role?: { stringValue?: string } };
+    };
+    const roleVal = data.fields?.role?.stringValue;
+    if (roleVal === 'admin' || roleVal === 'piket') {
+      return roleVal;
+    }
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function requireFirebaseStaff(
+  req: FirebaseAuthedRequest,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  const authHeader = req.headers.authorization || '';
+  const idToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+  if (!idToken) {
+    res.status(401).json({ success: false, message: 'Token autentikasi Firebase diperlukan.' });
+    return;
+  }
+
+  try {
+    const verified = await verifyFirebaseIdToken(idToken);
+    const role = await resolveFirebaseStaffRole(verified.email, idToken);
+    if (!role) {
+      res.status(403).json({ success: false, message: 'Akun tidak terdaftar sebagai staf sekolah.' });
+      return;
+    }
+    req.firebaseUser = {
+      uid: verified.uid,
+      email: verified.email,
+      role,
+      idToken,
+    };
+    next();
+  } catch (err: unknown) {
+    res.status(401).json({
+      success: false,
+      message: err instanceof Error ? err.message : 'Sesi Firebase tidak valid.',
+    });
+  }
+}
+
+function requireFirebaseAdmin(
+  req: FirebaseAuthedRequest,
+  res: Response,
+  next: NextFunction
+): void {
+  if (!req.firebaseUser || req.firebaseUser.role !== 'admin') {
+    res.status(403).json({ success: false, message: 'Akses ditolak. Khusus Administrator.' });
+    return;
+  }
+  next();
+}
+
+function isBlockedPrivateHost(hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  if (
+    !host ||
+    host === 'localhost' ||
+    host === '::1' ||
+    host === '0.0.0.0' ||
+    host.endsWith('.local') ||
+    host.endsWith('.internal')
+  ) {
+    return true;
+  }
+  if (/^127\./.test(host) || /^10\./.test(host) || /^192\.168\./.test(host) || /^169\.254\./.test(host)) {
+    return true;
+  }
+  const m172 = /^172\.(\d+)\./.exec(host);
+  if (m172) {
+    const second = Number(m172[1]);
+    if (second >= 16 && second <= 31) return true;
+  }
+  return false;
+}
+
+function validateHttpsGatewayUrl(rawUrl: string): URL {
+  const parsed = new URL(rawUrl.trim());
+  if (parsed.protocol !== 'https:') {
+    throw new Error('URL Gateway WhatsApp wajib menggunakan protokol HTTPS.');
+  }
+  if (isBlockedPrivateHost(parsed.hostname)) {
+    throw new Error('Host Gateway WhatsApp tidak diizinkan.');
+  }
+  return parsed;
+}
+
+function normalizeServerWaPhone(raw: string): string | null {
+  const digits = raw.replace(/\D/g, '');
+  if (!digits) return null;
+  let normalized = digits;
+  if (normalized.startsWith('0')) {
+    normalized = `62${normalized.slice(1)}`;
+  } else if (normalized.startsWith('8')) {
+    normalized = `62${normalized}`;
+  }
+  if (!/^[1-9]\d{9,15}$/.test(normalized)) {
+    return null;
+  }
+  return normalized;
+}
+
+async function sendViaWhatsAppGateway(params: {
+  phone: string;
+  message: string;
+  nis?: string;
+  nama_siswa?: string;
+  eventType?: string;
+}): Promise<{
+  sent: boolean;
+  configured: boolean;
+  code: string;
+  detail: string;
+}> {
+  const token = (process.env.WHATSAPP_API_TOKEN || '').trim();
+  const provider = (process.env.WHATSAPP_PROVIDER || 'fonnte').trim().toLowerCase();
+  const customGatewayUrl = (process.env.WHATSAPP_GATEWAY_URL || '').trim();
+  const metaPhoneNumberId = (process.env.WHATSAPP_PHONE_NUMBER_ID || '').trim();
+
+  if (!token) {
+    return {
+      sent: false,
+      configured: false,
+      code: 'GATEWAY_NOT_CONFIGURED',
+      detail: 'Gateway WhatsApp server belum dikonfigurasi (WHATSAPP_API_TOKEN belum diisi di Secrets).',
+    };
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 10000);
+
+  try {
+    let targetUrl: URL;
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    let payload: Record<string, unknown>;
+
+    if (provider === 'meta') {
+      if (!/^\d{5,30}$/.test(metaPhoneNumberId)) {
+        return {
+          sent: false,
+          configured: false,
+          code: 'META_PHONE_ID_MISSING',
+          detail: 'WHATSAPP_PHONE_NUMBER_ID belum diatur dengan valid untuk Meta Cloud API.',
+        };
+      }
+      targetUrl = validateHttpsGatewayUrl(
+        `https://graph.facebook.com/v20.0/${metaPhoneNumberId}/messages`
+      );
+      headers.Authorization = `Bearer ${token}`;
+      payload = {
+        messaging_product: 'whatsapp',
+        to: params.phone,
+        type: 'text',
+        text: { body: params.message },
+      };
+    } else if (provider === 'wablas') {
+      if (!customGatewayUrl) {
+        return {
+          sent: false,
+          configured: false,
+          code: 'WABLAS_URL_MISSING',
+          detail: 'WHATSAPP_GATEWAY_URL wajib diisi untuk provider Wablas.',
+        };
+      }
+      targetUrl = validateHttpsGatewayUrl(customGatewayUrl);
+      headers.Authorization = token;
+      payload = {
+        phone: params.phone,
+        message: params.message,
+      };
+    } else if (provider === 'webhook') {
+      if (!customGatewayUrl) {
+        return {
+          sent: false,
+          configured: false,
+          code: 'WEBHOOK_URL_MISSING',
+          detail: 'WHATSAPP_GATEWAY_URL wajib diisi untuk provider webhook.',
+        };
+      }
+      targetUrl = validateHttpsGatewayUrl(customGatewayUrl);
+      headers.Authorization = `Bearer ${token}`;
+      payload = {
+        phone: params.phone,
+        target: params.phone,
+        message: params.message,
+        nis: params.nis || '',
+        nama_siswa: params.nama_siswa || '',
+        eventType: params.eventType || 'masuk',
+      };
+    } else {
+      // Default: Fonnte
+      targetUrl = validateHttpsGatewayUrl(customGatewayUrl || 'https://api.fonnte.com/send');
+      headers.Authorization = token;
+      payload = {
+        target: params.phone,
+        message: params.message,
+        countryCode: '62',
+      };
+    }
+
+    const resp = await fetch(targetUrl.toString(), {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+
+    const rawText = await resp.text();
+    let parsed: Record<string, unknown> = {};
+    try {
+      parsed = JSON.parse(rawText) as Record<string, unknown>;
+    } catch {
+      parsed = {};
+    }
+
+    const gatewayRejected = parsed.status === false;
+    if (!resp.ok || gatewayRejected) {
+      const reason =
+        (typeof parsed.reason === 'string' && parsed.reason) ||
+        (typeof parsed.message === 'string' && parsed.message) ||
+        (typeof parsed.detail === 'string' && parsed.detail) ||
+        `HTTP ${resp.status}`;
+      return {
+        sent: false,
+        configured: true,
+        code: 'GATEWAY_ERROR',
+        detail: `Gateway menolak pengiriman: ${reason.slice(0, 180)}`,
+      };
+    }
+
+    return {
+      sent: true,
+      configured: true,
+      code: 'SENT',
+      detail: `Pesan WhatsApp otomatis terkirim ke ${params.phone}.`,
+    };
+  } catch (err: unknown) {
+    return {
+      sent: false,
+      configured: true,
+      code: 'NETWORK_ERROR',
+      detail:
+        err instanceof Error
+          ? `Gagal menghubungi gateway WhatsApp: ${err.message}`
+          : 'Gagal menghubungi gateway WhatsApp.',
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+app.get('/api/whatsapp/status', requireFirebaseStaff, (_req, res) => {
+  const token = (process.env.WHATSAPP_API_TOKEN || '').trim();
+  const provider = (process.env.WHATSAPP_PROVIDER || 'fonnte').trim().toLowerCase();
+  res.json({
+    success: true,
+    configured: Boolean(token),
+    provider,
+  });
+});
+
+app.post('/api/whatsapp/send', requireFirebaseStaff, async (req, res) => {
+  const phoneRaw = typeof req.body?.phone === 'string' ? req.body.phone : '';
+  const messageRaw = typeof req.body?.message === 'string' ? req.body.message.trim() : '';
+  const nis = typeof req.body?.nis === 'string' ? req.body.nis.trim().slice(0, 30) : '';
+  const namaSiswa =
+    typeof req.body?.nama_siswa === 'string' ? req.body.nama_siswa.trim().slice(0, 120) : '';
+  const eventType =
+    req.body?.eventType === 'pulang' ? 'pulang' : 'masuk';
+
+  const normalizedPhone = normalizeServerWaPhone(phoneRaw);
+  if (!normalizedPhone) {
+    res.status(400).json({
+      success: false,
+      configured: Boolean((process.env.WHATSAPP_API_TOKEN || '').trim()),
+      sent: false,
+      detail: 'Nomor WhatsApp orang tua tidak valid.',
+    });
+    return;
+  }
+
+  if (!messageRaw || messageRaw.length > 1500) {
+    res.status(400).json({
+      success: false,
+      configured: Boolean((process.env.WHATSAPP_API_TOKEN || '').trim()),
+      sent: false,
+      detail: 'Isi pesan harus antara 1 sampai 1500 karakter.',
+    });
+    return;
+  }
+
+  const result = await sendViaWhatsAppGateway({
+    phone: normalizedPhone,
+    message: messageRaw,
+    nis,
+    nama_siswa: namaSiswa,
+    eventType,
+  });
+
+  res.json({
+    success: result.sent,
+    configured: result.configured,
+    sent: result.sent,
+    normalizedPhone,
+    code: result.code,
+    detail: result.detail,
+  });
+});
+
+app.post('/api/whatsapp/test', requireFirebaseStaff, requireFirebaseAdmin, async (req, res) => {
+  const phoneRaw = typeof req.body?.phone === 'string' ? req.body.phone : '';
+  const messageRaw = typeof req.body?.message === 'string' ? req.body.message.trim() : '';
+  const normalizedPhone = normalizeServerWaPhone(phoneRaw);
+
+  if (!normalizedPhone) {
+    res.status(400).json({
+      success: false,
+      sent: false,
+      detail: 'Nomor tujuan uji coba tidak valid.',
+    });
+    return;
+  }
+  if (!messageRaw || messageRaw.length > 1500) {
+    res.status(400).json({
+      success: false,
+      sent: false,
+      detail: 'Pesan uji coba harus 1–1500 karakter.',
+    });
+    return;
+  }
+
+  const result = await sendViaWhatsAppGateway({
+    phone: normalizedPhone,
+    message: messageRaw,
+    nis: 'TEST_WA',
+    nama_siswa: 'Uji Coba Pengiriman',
+    eventType: 'test',
+  });
+
+  res.json({
+    success: result.sent,
+    configured: result.configured,
+    sent: result.sent,
+    normalizedPhone,
+    code: result.code,
+    detail: result.detail,
+  });
+});
+
+// ==========================================
+// DYNAMIC PWA / SHORTCUT ICON SERVING
+// ==========================================
+
+const execFileAsync = promisify(execFile);
+const LOGO_FETCH_TTL_MS = 30_000;
+const MAX_LOGO_BYTES = 512 * 1024;
+const TMP_ICON_ROOT = path.resolve(os.tmpdir(), 'absensi-pwa-icons');
+
+type DynamicIconKind = '192' | '512' | 'maskable' | 'apple' | 'favicon';
+
+interface IconBundle {
+  '192': Buffer;
+  '512': Buffer;
+  maskable: Buffer;
+  apple: Buffer;
+  favicon: Buffer;
+}
+
+let cachedLogoFetch: { logo: string; fetchedAt: number } | null = null;
+let cachedIconHash = '';
+let cachedIconBundle: IconBundle | null = null;
+const pendingIconJobs = new Map<string, Promise<IconBundle | null>>();
+
+async function getSchoolLogoFromFirestore(): Promise<string | null> {
+  const now = Date.now();
+  if (cachedLogoFetch && now - cachedLogoFetch.fetchedAt < LOGO_FETCH_TTL_MS) {
+    return cachedLogoFetch.logo || null;
+  }
+
+  if (!firebaseAppletConfig.projectId) {
+    return null;
+  }
+
+  const dbId = encodeURIComponent(firebaseAppletConfig.firestoreDatabaseId || '(default)');
+  const docUrl = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(
+    firebaseAppletConfig.projectId
+  )}/databases/${dbId}/documents/pengaturan/main`;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 5000);
+  try {
+    const resp = await fetch(docUrl, { signal: controller.signal });
+    if (!resp.ok) {
+      return null;
+    }
+    const data = (await resp.json()) as {
+      fields?: { logo?: { stringValue?: string } };
+    };
+    const logo = typeof data.fields?.logo?.stringValue === 'string' ? data.fields.logo.stringValue.trim() : '';
+    cachedLogoFetch = { logo, fetchedAt: now };
+    return logo || null;
+  } catch {
+    return cachedLogoFetch?.logo || null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function generateIconBundleFromDataUrl(logoDataUrl: string): Promise<IconBundle | null> {
+  const match = /^data:image\/(jpeg|jpg|png|webp);base64,([A-Za-z0-9+/=]+)$/.exec(logoDataUrl);
+  if (!match) {
+    return null;
+  }
+
+  const rawBuf = Buffer.from(match[2], 'base64');
+  if (rawBuf.length === 0 || rawBuf.length > MAX_LOGO_BYTES) {
+    return null;
+  }
+
+  const hash = crypto.createHash('sha256').update(rawBuf).digest('hex');
+  if (cachedIconHash === hash && cachedIconBundle) {
+    return cachedIconBundle;
+  }
+
+  const existingJob = pendingIconJobs.get(hash);
+  if (existingJob) {
+    return existingJob;
+  }
+
+  const job = (async (): Promise<IconBundle | null> => {
+    fs.mkdirSync(TMP_ICON_ROOT, { recursive: true });
+    const jobId = crypto.randomBytes(10).toString('hex');
+    const ext = match[1] === 'jpeg' ? 'jpg' : match[1];
+    const srcPath = path.resolve(TMP_ICON_ROOT, `${jobId}_src.${ext}`);
+    const cleanPath = path.resolve(TMP_ICON_ROOT, `${jobId}_clean.png`);
+    const out192 = path.resolve(TMP_ICON_ROOT, `${jobId}_192.png`);
+    const out512 = path.resolve(TMP_ICON_ROOT, `${jobId}_512.png`);
+    const outMaskable = path.resolve(TMP_ICON_ROOT, `${jobId}_maskable.png`);
+    const outApple = path.resolve(TMP_ICON_ROOT, `${jobId}_apple.png`);
+    const outFavicon = path.resolve(TMP_ICON_ROOT, `${jobId}_favicon.ico`);
+
+    const allPaths = [srcPath, cleanPath, out192, out512, outMaskable, outApple, outFavicon];
+    for (const p of allPaths) {
+      if (!p.startsWith(TMP_ICON_ROOT + path.sep)) {
+        throw new Error('Path confinement check failed');
+      }
+    }
+
+    try {
+      fs.writeFileSync(srcPath, rawBuf);
+      const { stdout: dimOut } = await execFileAsync(
+        '/usr/bin/identify',
+        ['-format', '%w %h', srcPath],
+        { timeout: 5000 }
+      );
+      const [wStr, hStr] = dimOut.trim().split(/\s+/);
+      const width = Number(wStr);
+      const height = Number(hStr);
+      if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0 || width > 4096 || height > 4096) {
+        return null;
+      }
+
+      const { stdout: cornerOut } = await execFileAsync(
+        '/usr/bin/convert',
+        [
+          srcPath,
+          '-crop',
+          '1x1+0+0',
+          '+repage',
+          '-colorspace',
+          'sRGB',
+          '-format',
+          '%[fx:int(255*r)] %[fx:int(255*g)] %[fx:int(255*b)]',
+          'info:',
+        ],
+        { timeout: 5000 }
+      );
+      const [rStr, gStr, bStr] = cornerOut.trim().split(/\s+/);
+      const isNearWhiteCorner = Number(rStr) >= 220 && Number(gStr) >= 220 && Number(bStr) >= 220;
+
+      if (isNearWhiteCorner && width > 1 && height > 1) {
+        await execFileAsync(
+          '/usr/bin/convert',
+          [
+            srcPath,
+            '-auto-orient',
+            '-alpha',
+            'set',
+            '-fuzz',
+            '12%',
+            '-fill',
+            'none',
+            '-draw',
+            'color 0,0 floodfill',
+            '-draw',
+            `color ${width - 1},0 floodfill`,
+            '-draw',
+            `color 0,${height - 1} floodfill`,
+            '-draw',
+            `color ${width - 1},${height - 1} floodfill`,
+            cleanPath,
+          ],
+          { timeout: 8000 }
+        );
+      } else {
+        await execFileAsync('/usr/bin/convert', [srcPath, '-auto-orient', cleanPath], {
+          timeout: 8000,
+        });
+      }
+
+      await Promise.all([
+        execFileAsync(
+          '/usr/bin/convert',
+          [cleanPath, '-resize', '176x176', '-gravity', 'center', '-background', 'none', '-extent', '192x192', out192],
+          { timeout: 8000 }
+        ),
+        execFileAsync(
+          '/usr/bin/convert',
+          [cleanPath, '-resize', '472x472', '-gravity', 'center', '-background', 'none', '-extent', '512x512', out512],
+          { timeout: 8000 }
+        ),
+        execFileAsync(
+          '/usr/bin/convert',
+          [cleanPath, '-resize', '384x384', '-gravity', 'center', '-background', 'white', '-flatten', '-extent', '512x512', outMaskable],
+          { timeout: 8000 }
+        ),
+        execFileAsync(
+          '/usr/bin/convert',
+          [cleanPath, '-resize', '164x164', '-gravity', 'center', '-background', 'white', '-flatten', '-extent', '180x180', outApple],
+          { timeout: 8000 }
+        ),
+        execFileAsync(
+          '/usr/bin/convert',
+          [cleanPath, '-resize', '44x44', '-gravity', 'center', '-background', 'none', '-extent', '48x48', outFavicon],
+          { timeout: 8000 }
+        ),
+      ]);
+
+      const bundle: IconBundle = {
+        '192': fs.readFileSync(out192),
+        '512': fs.readFileSync(out512),
+        maskable: fs.readFileSync(outMaskable),
+        apple: fs.readFileSync(outApple),
+        favicon: fs.readFileSync(outFavicon),
+      };
+
+      cachedIconHash = hash;
+      cachedIconBundle = bundle;
+      return bundle;
+    } catch (err) {
+      console.error('Gagal mengonversi ikon PWA dinamis:', err);
+      return null;
+    } finally {
+      for (const p of allPaths) {
+        try {
+          fs.rmSync(p, { force: true });
+        } catch {
+          // ignore cleanup failure
+        }
+      }
+    }
+  })();
+
+  pendingIconJobs.set(hash, job);
+  try {
+    return await job;
+  } finally {
+    pendingIconJobs.delete(hash);
+  }
+}
+
+app.post('/api/pengaturan/icon-cache-reset', requireFirebaseStaff, requireFirebaseAdmin, (_req, res) => {
+  cachedLogoFetch = null;
+  res.json({ success: true });
+});
+
+const DYNAMIC_ICON_ROUTES: Record<string, { kind: DynamicIconKind; contentType: string }> = {
+  '/pwa-192x192.png': { kind: '192', contentType: 'image/png' },
+  '/pwa-512x512.png': { kind: '512', contentType: 'image/png' },
+  '/pwa-maskable-512x512.png': { kind: 'maskable', contentType: 'image/png' },
+  '/apple-touch-icon.png': { kind: 'apple', contentType: 'image/png' },
+  '/favicon.ico': { kind: 'favicon', contentType: 'image/x-icon' },
+};
+
+app.get(Object.keys(DYNAMIC_ICON_ROUTES), async (req, res, next) => {
+  const cfg = DYNAMIC_ICON_ROUTES[req.path];
+  if (!cfg) {
+    next();
+    return;
+  }
+
+  try {
+    const logo = await getSchoolLogoFromFirestore();
+    if (!logo || !logo.startsWith('data:image/')) {
+      next();
+      return;
+    }
+    const bundle = await generateIconBundleFromDataUrl(logo);
+    if (!bundle) {
+      next();
+      return;
+    }
+    res.setHeader('Content-Type', cfg.contentType);
+    res.setHeader('Cache-Control', 'public, max-age=60, must-revalidate');
+    res.send(bundle[cfg.kind]);
+  } catch {
+    next();
+  }
+});
+
+// ==========================================
 // VITE / STATIC SERVING
 // ==========================================
 
 async function startServer() {
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: { middlewareMode: true, hmr: false },
       appType: 'spa',
     });
     app.use(vite.middlewares);

@@ -27,6 +27,14 @@ export function KartuPage({ pengaturan }: KartuPageProps) {
     return () => unsub();
   }, []);
 
+  const kelasOptions = useMemo(() => {
+    const set = new Set<string>();
+    for (const s of allStudents) {
+      if (s.kelas) set.add(s.kelas);
+    }
+    return Array.from(set).sort((a, b) => a.localeCompare(b, 'id', { numeric: true }));
+  }, [allStudents]);
+
   const students = useMemo(() => {
     return allStudents.filter((s) => {
       if (kelasFilter && s.kelas !== kelasFilter) return false;
@@ -93,9 +101,11 @@ export function KartuPage({ pengaturan }: KartuPageProps) {
             className="h-10 px-3 rounded-lg border border-slate-300 text-sm bg-white text-slate-700"
           >
             <option value="">Semua Kelas</option>
-            <option value="X">Kelas X</option>
-            <option value="XI">Kelas XI</option>
-            <option value="XII">Kelas XII</option>
+            {kelasOptions.map((k) => (
+              <option key={k} value={k}>
+                Kelas {k}
+              </option>
+            ))}
           </select>
 
           <select

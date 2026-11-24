@@ -6,6 +6,7 @@ import {
   getDocs,
   limit,
   onSnapshot,
+  orderBy,
   query,
   runTransaction,
   serverTimestamp,
@@ -14,7 +15,17 @@ import {
   where,
   writeBatch,
 } from 'firebase/firestore';
-import { AbsensiLogItem, AbsensiStatus, Pengaturan, Siswa, StaffMember, UserRole } from '../types';
+import {
+  AbsensiLogItem,
+  AbsensiStatus,
+  Pengaturan,
+  Siswa,
+  StaffMember,
+  UserRole,
+  WaConfig,
+  WaLogItem,
+  WaSendStatus,
+} from '../types';
 import { db, handleFirestoreError, OperationType } from './firebase';
 
 export const BOOTSTRAPPED_ADMIN_EMAIL = 'jianmaulana44@admin.smk.belajar.id';
@@ -328,6 +339,7 @@ export async function saveSiswaRecord(
   isEdit: boolean
 ): Promise<void> {
   const nis = data.nis.trim();
+  const normalizedKelas = data.kelas.trim().replace(/\s+/g, ' ').toUpperCase().slice(0, 20);
   const ref = doc(db, 'siswa', nis);
   try {
     if (isEdit) {
@@ -335,7 +347,7 @@ export async function saveSiswaRecord(
         nisn: data.nisn.trim(),
         nama_siswa: data.nama_siswa.trim(),
         jenis_kelamin: data.jenis_kelamin,
-        kelas: data.kelas.trim(),
+        kelas: normalizedKelas,
         jurusan: data.jurusan.trim(),
         no_hp_ortu: data.no_hp_ortu.trim(),
         foto: data.foto,
@@ -352,7 +364,7 @@ export async function saveSiswaRecord(
         nisn: data.nisn.trim(),
         nama_siswa: data.nama_siswa.trim(),
         jenis_kelamin: data.jenis_kelamin,
-        kelas: data.kelas.trim(),
+        kelas: normalizedKelas,
         jurusan: data.jurusan.trim(),
         no_hp_ortu: data.no_hp_ortu.trim(),
         foto: data.foto,
@@ -414,12 +426,21 @@ function normalizeImportedJurusan(raw: string): string {
   return '';
 }
 
+function sanitizeImportedFoto(raw: unknown): string {
+  const val = typeof raw === 'string' ? raw.trim() : '';
+  if (!val || val.length > 250000) return '';
+  if (/^https?:\/\//i.test(val)) return val;
+  if (/^data:image\/(jpeg|jpg|png|webp);base64,[a-zA-Z0-9+/=]+$/i.test(val)) return val;
+  return '';
+}
+
 export async function importSiswaRows(
-  rows: Array<Record<string, unknown>>
+  rows: Array<Record<string, unknown>>,
+  existingPhotosByNis?: Map<string, string>
 ): Promise<{ processed: number; skipped: number }> {
   let processed = 0;
   let skipped = 0;
-  const batch = writeBatch(db);
+  const docsToWrite: Array<{ nis: string; payload: Record<string, unknown> }> = [];
 
   for (const r of rows) {
     const nis = String(r.NIS ?? r.nis ?? '').trim();
@@ -427,19 +448,41 @@ export async function importSiswaRows(
     const nama = String(r.NAMA_SISWA ?? r.nama_siswa ?? r.NAMA ?? '').trim();
     const jkRaw = String(r.JK ?? r.jenis_kelamin ?? 'L').trim().toUpperCase();
     const jk: 'L' | 'P' = jkRaw === 'P' ? 'P' : 'L';
-    const kelasRaw = String(r.KELAS ?? r.kelas ?? '').trim().toUpperCase();
-    const kelas = ['X', 'XI', 'XII'].includes(kelasRaw) ? kelasRaw : '';
+    const kelasRaw = String(
+      r.KELAS ?? r.kelas ?? r['KELAS / ROMBEL'] ?? r.ROMBEL ?? ''
+    )
+      .trim()
+      .replace(/\s+/g, ' ')
+      .toUpperCase();
+    const kelas = kelasRaw.length >= 1 && kelasRaw.length <= 20 ? kelasRaw : '';
     const jurusan = normalizeImportedJurusan(String(r.JURUSAN ?? r.jurusan ?? ''));
-    const hp = String(r.NO_HP_ORTU ?? r.no_hp_ortu ?? '').trim();
+    const hpRaw = String(
+      r.NO_HP_ORTU ??
+        r.no_hp_ortu ??
+        r['NO HP ORTU'] ??
+        r.NO_HP ??
+        r.no_hp ??
+        r.HP_ORTU ??
+        r.NO_WA ??
+        r.WHATSAPP ??
+        ''
+    ).trim();
+    const hpDigits = hpRaw.replace(/\D/g, '');
+    const hp = hpDigits.startsWith('8') ? `0${hpDigits}` : hpRaw;
+    const importedFoto = sanitizeImportedFoto(
+      r.FOTO ?? r.foto ?? r.FOTO_URL ?? r.foto_url ?? r.LINK_FOTO ?? r.URL_FOTO ?? ''
+    );
+    const preservedFoto = existingPhotosByNis?.get(nis) ?? '';
+    const finalFoto = importedFoto || preservedFoto;
 
     if (!nis || !/^[a-zA-Z0-9_-]+$/.test(nis) || !nama || !kelas || !jurusan) {
       skipped++;
       continue;
     }
 
-    batch.set(
-      doc(db, 'siswa', nis),
-      {
+    docsToWrite.push({
+      nis,
+      payload: {
         nis,
         nisn,
         nama_siswa: nama,
@@ -447,23 +490,61 @@ export async function importSiswaRows(
         kelas,
         jurusan,
         no_hp_ortu: hp,
-        foto: '',
+        foto: finalFoto,
         status_aktif: 'aktif',
         updatedAt: serverTimestamp(),
       },
-      { merge: true }
-    );
+    });
     processed++;
   }
 
-  if (processed > 0) {
+  if (docsToWrite.length > 0) {
     try {
-      await batch.commit();
+      const CHUNK = 400;
+      for (let i = 0; i < docsToWrite.length; i += CHUNK) {
+        const slice = docsToWrite.slice(i, i + CHUNK);
+        const batch = writeBatch(db);
+        for (const item of slice) {
+          batch.set(doc(db, 'siswa', item.nis), item.payload, { merge: true });
+        }
+        await batch.commit();
+      }
     } catch (err) {
       handleFirestoreError(err, OperationType.WRITE, 'siswa/batch_import');
     }
   }
   return { processed, skipped };
+}
+
+export async function bulkUpdateSiswaPhotos(
+  items: Array<{ nis: string; foto: string }>
+): Promise<number> {
+  const valid = items.filter(
+    (item) =>
+      /^[a-zA-Z0-9_-]+$/.test(item.nis.trim()) &&
+      typeof item.foto === 'string' &&
+      item.foto.length > 0 &&
+      item.foto.length <= 250000
+  );
+  if (valid.length === 0) return 0;
+
+  try {
+    const CHUNK = 40;
+    for (let i = 0; i < valid.length; i += CHUNK) {
+      const slice = valid.slice(i, i + CHUNK);
+      const batch = writeBatch(db);
+      for (const item of slice) {
+        batch.update(doc(db, 'siswa', item.nis.trim()), {
+          foto: item.foto,
+          updatedAt: serverTimestamp(),
+        });
+      }
+      await batch.commit();
+    }
+    return valid.length;
+  } catch (err) {
+    handleFirestoreError(err, OperationType.UPDATE, 'siswa/bulk_photo');
+  }
 }
 
 export function subscribeTodayAbsensi(
@@ -946,10 +1027,121 @@ export function resizeImageFileToDataUrl(file: File, maxSize = 256): Promise<str
         ctx.fillStyle = '#ffffff';
         ctx.fillRect(0, 0, w, h);
         ctx.drawImage(img, 0, 0, w, h);
-        resolve(canvas.toDataURL('image/jpeg', 0.85));
+        let out = canvas.toDataURL('image/jpeg', 0.85);
+        if (out.length > 240000) {
+          out = canvas.toDataURL('image/jpeg', 0.6);
+        }
+        resolve(out);
       };
       img.src = String(reader.result);
     };
     reader.readAsDataURL(file);
   });
 }
+
+export const DEFAULT_WA_CONFIG: WaConfig = {
+  enabled: true,
+  notify_masuk: true,
+  notify_pulang: true,
+  template_masuk:
+    "Assalamu'alaikum Wr. Wb.\nYth. Orang Tua/Wali dari *{nama_siswa}* ({kelas} {jurusan}),\n\nKami informasikan ananda telah melakukan *ABSEN MASUK* di {nama_sekolah}.\n\n- NIS: {nis}\n- Tanggal: {tanggal}\n- Jam Masuk: {jam} WIB\n- Status: *{status}*\n\nTerima kasih.",
+  template_pulang:
+    "Assalamu'alaikum Wr. Wb.\nYth. Orang Tua/Wali dari *{nama_siswa}* ({kelas} {jurusan}),\n\nKami informasikan ananda telah melakukan *ABSEN PULANG* dari {nama_sekolah}.\n\n- NIS: {nis}\n- Tanggal: {tanggal}\n- Jam Pulang: {jam} WIB\n\nSemoga selamat sampai di rumah. Terima kasih.",
+};
+
+export function subscribeWaConfig(
+  onData: (cfg: WaConfig) => void,
+  onErr?: (e: Error) => void
+): () => void {
+  return onSnapshot(
+    doc(db, 'wa_config', 'main'),
+    (snap) => {
+      if (snap.exists()) {
+        const d = snap.data() as Partial<WaConfig>;
+        onData({
+          enabled: typeof d.enabled === 'boolean' ? d.enabled : DEFAULT_WA_CONFIG.enabled,
+          notify_masuk:
+            typeof d.notify_masuk === 'boolean' ? d.notify_masuk : DEFAULT_WA_CONFIG.notify_masuk,
+          notify_pulang:
+            typeof d.notify_pulang === 'boolean' ? d.notify_pulang : DEFAULT_WA_CONFIG.notify_pulang,
+          template_masuk: d.template_masuk || DEFAULT_WA_CONFIG.template_masuk,
+          template_pulang: d.template_pulang || DEFAULT_WA_CONFIG.template_pulang,
+        });
+      } else {
+        onData(DEFAULT_WA_CONFIG);
+      }
+    },
+    (error) => {
+      if (onErr) onErr(error);
+      else handleFirestoreError(error, OperationType.GET, 'wa_config/main');
+    }
+  );
+}
+
+export async function saveWaConfig(cfg: WaConfig): Promise<void> {
+  try {
+    await setDoc(doc(db, 'wa_config', 'main'), {
+      enabled: Boolean(cfg.enabled),
+      notify_masuk: Boolean(cfg.notify_masuk),
+      notify_pulang: Boolean(cfg.notify_pulang),
+      template_masuk: cfg.template_masuk.trim().slice(0, 1000),
+      template_pulang: cfg.template_pulang.trim().slice(0, 1000),
+      updatedAt: serverTimestamp(),
+    });
+  } catch (err) {
+    handleFirestoreError(err, OperationType.WRITE, 'wa_config/main');
+  }
+}
+
+export async function recordWaLog(params: {
+  nis: string;
+  nama_siswa: string;
+  no_hp_ortu: string;
+  jenis: 'masuk' | 'pulang' | 'test';
+  tanggal: string;
+  jam: string;
+  status_kirim: WaSendStatus;
+  keterangan: string;
+  petugas: string;
+  uid: string;
+}): Promise<void> {
+  const safeNis = params.nis.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 30) || 'test';
+  const docId = `${params.tanggal}_${params.jenis}_${safeNis}_${Date.now()}`.slice(0, 128);
+  try {
+    await setDoc(doc(db, 'wa_logs', docId), {
+      nis: safeNis,
+      nama_siswa: params.nama_siswa.trim().slice(0, 120) || 'Siswa',
+      no_hp_ortu: params.no_hp_ortu.trim().slice(0, 25),
+      jenis: params.jenis,
+      tanggal: params.tanggal,
+      jam: params.jam.slice(0, 8),
+      status_kirim: params.status_kirim,
+      keterangan: params.keterangan.trim().slice(0, 300),
+      petugas: params.petugas.trim().slice(0, 120) || 'Petugas',
+      recordedByUid: params.uid,
+      createdAt: serverTimestamp(),
+    });
+  } catch (err) {
+    console.error('Gagal mencatat wa_logs:', err);
+  }
+}
+
+export function subscribeRecentWaLogs(
+  onData: (rows: WaLogItem[]) => void
+): () => void {
+  const q = query(collection(db, 'wa_logs'), orderBy('createdAt', 'desc'), limit(20));
+  return onSnapshot(
+    q,
+    (snap) => {
+      const list = snap.docs.map((d) => ({
+        ...(d.data() as Omit<WaLogItem, 'id'>),
+        id: d.id,
+      }));
+      onData(list);
+    },
+    (error) => {
+      console.error('Gagal memuat riwayat WA:', error);
+    }
+  );
+}
+

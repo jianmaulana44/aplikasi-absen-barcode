@@ -81,3 +81,38 @@ export interface JurusanBreakdown {
   terlambat: number;
   izin_sakit: number;
 }
+
+export interface WaConfig {
+  enabled: boolean;
+  notify_masuk: boolean;
+  notify_pulang: boolean;
+  template_masuk: string;
+  template_pulang: string;
+}
+
+export type WaSendStatus = 'terkirim' | 'gagal' | 'belum_konfigurasi';
+
+export interface WaLogItem {
+  id: string;
+  nis: string;
+  nama_siswa: string;
+  no_hp_ortu: string;
+  jenis: 'masuk' | 'pulang' | 'test';
+  tanggal: string;
+  jam: string;
+  status_kirim: WaSendStatus;
+  keterangan: string;
+  petugas: string;
+  recordedByUid?: string;
+}
+
+export interface WaSendResult {
+  sent: boolean;
+  configured: boolean;
+  statusKirim: WaSendStatus;
+  normalizedPhone: string;
+  message: string;
+  fallbackUrl: string;
+  detail: string;
+}
+

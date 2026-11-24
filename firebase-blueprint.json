@@ -49,7 +49,7 @@
         "nisn": { "type": "string", "maxLength": 30 },
         "nama_siswa": { "type": "string", "minLength": 1, "maxLength": 120 },
         "jenis_kelamin": { "type": "string", "enum": ["L", "P"] },
-        "kelas": { "type": "string", "enum": ["X", "XI", "XII"] },
+        "kelas": { "type": "string", "minLength": 1, "maxLength": 20 },
         "jurusan": { "type": "string", "minLength": 1, "maxLength": 60 },
         "no_hp_ortu": { "type": "string", "maxLength": 25 },
         "foto": { "type": "string", "maxLength": 250000 },
@@ -76,7 +76,7 @@
       "properties": {
         "nis": { "type": "string", "minLength": 1, "maxLength": 30, "pattern": "^[a-zA-Z0-9_\\-]+$" },
         "nama_siswa": { "type": "string", "minLength": 1, "maxLength": 120 },
-        "kelas": { "type": "string", "minLength": 1, "maxLength": 10 },
+        "kelas": { "type": "string", "minLength": 1, "maxLength": 20 },
         "jurusan": { "type": "string", "minLength": 1, "maxLength": 60 },
         "foto": { "type": "string", "maxLength": 250000 },
         "tanggal": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
@@ -103,6 +103,58 @@
         "recordedByUid",
         "updatedAt"
       ]
+    },
+    "WaConfig": {
+      "title": "Pengaturan Notifikasi WhatsApp",
+      "description": "Konfigurasi pesan otomatis WhatsApp ke orang tua siswa saat absen datang dan pulang (tanpa menyimpan token rahasia).",
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "notify_masuk": { "type": "boolean" },
+        "notify_pulang": { "type": "boolean" },
+        "template_masuk": { "type": "string", "minLength": 5, "maxLength": 1000 },
+        "template_pulang": { "type": "string", "minLength": 5, "maxLength": 1000 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "enabled",
+        "notify_masuk",
+        "notify_pulang",
+        "template_masuk",
+        "template_pulang",
+        "updatedAt"
+      ]
+    },
+    "WaLog": {
+      "title": "Riwayat Notifikasi WhatsApp",
+      "description": "Log pengiriman pesan WhatsApp ke nomor orang tua siswa saat absen masuk dan pulang.",
+      "type": "object",
+      "properties": {
+        "nis": { "type": "string", "minLength": 1, "maxLength": 30, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "nama_siswa": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "no_hp_ortu": { "type": "string", "maxLength": 25 },
+        "jenis": { "type": "string", "enum": ["masuk", "pulang", "test"] },
+        "tanggal": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "jam": { "type": "string", "maxLength": 8 },
+        "status_kirim": { "type": "string", "enum": ["terkirim", "gagal", "belum_konfigurasi"] },
+        "keterangan": { "type": "string", "maxLength": 300 },
+        "petugas": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "recordedByUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "nis",
+        "nama_siswa",
+        "no_hp_ortu",
+        "jenis",
+        "tanggal",
+        "jam",
+        "status_kirim",
+        "keterangan",
+        "petugas",
+        "recordedByUid",
+        "createdAt"
+      ]
     }
   },
   "firestore": {
@@ -121,6 +173,14 @@
     "/absensi/{absensiId}": {
       "schema": { "$ref": "#/entities/Absensi" },
       "description": "Log kehadiran harian dengan dokumen ID berformat YYYY-MM-DD_NIS."
+    },
+    "/wa_config/{configId}": {
+      "schema": { "$ref": "#/entities/WaConfig" },
+      "description": "Konfigurasi notifikasi WhatsApp pada dokumen /wa_config/main."
+    },
+    "/wa_logs/{logId}": {
+      "schema": { "$ref": "#/entities/WaLog" },
+      "description": "Riwayat pengiriman notifikasi WhatsApp otomatis ke orang tua siswa."
     }
   }
 }

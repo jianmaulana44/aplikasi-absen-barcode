@@ -3,6 +3,7 @@ import * as XLSX from 'xlsx';
 import {
   CheckSquare,
   Download,
+  Images,
   Pencil,
   Plus,
   Search,
@@ -12,6 +13,7 @@ import {
   X,
 } from 'lucide-react';
 import {
+  bulkUpdateSiswaPhotos,
   deleteMultipleSiswaRecords,
   deleteSiswaRecord,
   importSiswaRows,
@@ -22,7 +24,17 @@ import {
 import { JURUSAN_OPTIONS, Siswa } from '../types';
 import { StudentAvatar } from '../components/StudentAvatar';
 
-const KELAS_OPTIONS = ['X', 'XI', 'XII'];
+const DEFAULT_KELAS_SUGGESTIONS = [
+  'X',
+  'X A',
+  'X B',
+  'XI',
+  'XI A',
+  'XI B',
+  'XII',
+  'XII A',
+  'XII B',
+];
 
 const EMPTY_FORM = {
   nis: '',
@@ -49,6 +61,7 @@ export function SiswaPage() {
   const [formOpen, setFormOpen] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
   const [form, setForm] = useState(EMPTY_FORM);
+  const [customKelasMode, setCustomKelasMode] = useState(false);
   const [uploadingPhoto, setUploadingPhoto] = useState(false);
   const [saving, setSaving] = useState(false);
 
@@ -59,6 +72,15 @@ export function SiswaPage() {
 
   const excelInputRef = useRef<HTMLInputElement | null>(null);
   const [importing, setImporting] = useState(false);
+
+  const bulkPhotoInputRef = useRef<HTMLInputElement | null>(null);
+  const [bulkPhotoOpen, setBulkPhotoOpen] = useState(false);
+  const [bulkPhotoProcessing, setBulkPhotoProcessing] = useState(false);
+  const [bulkPhotoSaving, setBulkPhotoSaving] = useState(false);
+  const [bulkMatchedPhotos, setBulkMatchedPhotos] = useState<
+    Array<{ nis: string; nama_siswa: string; filename: string; foto: string }>
+  >([]);
+  const [bulkUnmatchedFiles, setBulkUnmatchedFiles] = useState<string[]>([]);
 
   useEffect(() => {
     const unsub = subscribeSiswa(
@@ -81,6 +103,19 @@ export function SiswaPage() {
     );
     return () => unsub();
   }, []);
+
+  const dynamicKelasOptions = useMemo(() => {
+    const set = new Set<string>();
+    for (const s of allStudents) {
+      if (s.kelas) set.add(s.kelas);
+    }
+    return Array.from(set).sort((a, b) => a.localeCompare(b, 'id', { numeric: true }));
+  }, [allStudents]);
+
+  const modalKelasSuggestions = useMemo(() => {
+    const set = new Set<string>([...DEFAULT_KELAS_SUGGESTIONS, ...dynamicKelasOptions]);
+    return Array.from(set).sort((a, b) => a.localeCompare(b, 'id', { numeric: true }));
+  }, [dynamicKelasOptions]);
 
   const students = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -137,12 +172,14 @@ export function SiswaPage() {
 
   function openAddModal() {
     setIsEditing(false);
+    setCustomKelasMode(false);
     setForm(EMPTY_FORM);
     setFormOpen(true);
   }
 
   function openEditModal(s: Siswa) {
     setIsEditing(true);
+    setCustomKelasMode(Boolean(s.kelas && !modalKelasSuggestions.includes(s.kelas)));
     setForm({
       nis: s.nis,
       nisn: s.nisn || '',
@@ -242,18 +279,20 @@ export function SiswaPage() {
         NISN: '0089123401',
         NAMA_SISWA: 'Ahmad Fauzi',
         JK: 'L',
-        KELAS: 'X',
+        KELAS: 'X A',
         JURUSAN: 'Rekayasa Perangkat Lunak',
         NO_HP_ORTU: '081234567890',
+        FOTO: '',
       },
       {
         NIS: '24251099',
         NISN: '0089123402',
         NAMA_SISWA: 'Siti Rahmawati',
         JK: 'P',
-        KELAS: 'XI',
+        KELAS: 'X B',
         JURUSAN: 'Perhotelan',
         NO_HP_ORTU: '081298765432',
+        FOTO: '',
       },
       {
         NIS: '24251100',
@@ -263,6 +302,7 @@ export function SiswaPage() {
         KELAS: 'XII',
         JURUSAN: 'Teknik Kendaraan Ringan Otomotif',
         NO_HP_ORTU: '081277788899',
+        FOTO: '',
       },
     ];
     const ws = XLSX.utils.json_to_sheet(templateRows);
@@ -274,6 +314,7 @@ export function SiswaPage() {
       { wch: 8 },
       { wch: 36 },
       { wch: 16 },
+      { wch: 28 },
     ];
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, 'Template_Siswa');
@@ -299,7 +340,8 @@ export function SiswaPage() {
         throw new Error('Tidak ada baris data yang ditemukan pada file Excel.');
       }
 
-      const res = await importSiswaRows(rows);
+      const existingPhotos = new Map(allStudents.map((s) => [s.nis, s.foto || '']));
+      const res = await importSiswaRows(rows, existingPhotos);
       setNotice({
         type: 'ok',
         text: `Import selesai: ${res.processed} data siswa berhasil disimpan${res.skipped > 0 ? `, ${res.skipped} baris dilewati (pastikan jurusan sesuai 3 jurusan resmi)` : ''}.`,
@@ -311,6 +353,82 @@ export function SiswaPage() {
       });
     } finally {
       setImporting(false);
+    }
+  }
+
+  function openBulkPhotoModal() {
+    setBulkMatchedPhotos([]);
+    setBulkUnmatchedFiles([]);
+    setBulkPhotoOpen(true);
+  }
+
+  async function handleSelectBulkPhotos(e: ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(e.target.files || []);
+    e.target.value = '';
+    if (files.length === 0) return;
+
+    setBulkPhotoProcessing(true);
+    const byNisLower = new Map<string, Siswa>();
+    for (const s of allStudents) {
+      byNisLower.set(s.nis.trim().toLowerCase(), s);
+    }
+
+    const matchedMap = new Map<
+      string,
+      { nis: string; nama_siswa: string; filename: string; foto: string }
+    >();
+    const unmatched: string[] = [];
+
+    for (const file of files) {
+      const baseName = file.name.replace(/\.[^.]+$/, '').trim();
+      const lowerBase = baseName.toLowerCase();
+      const leadingToken = lowerBase.split(/[\s_-]+/)[0] || '';
+      const student = byNisLower.get(lowerBase) || byNisLower.get(leadingToken);
+
+      if (!student) {
+        unmatched.push(file.name);
+        continue;
+      }
+
+      try {
+        const dataUrl = await resizeImageFileToDataUrl(file, 256);
+        matchedMap.set(student.nis, {
+          nis: student.nis,
+          nama_siswa: student.nama_siswa,
+          filename: file.name,
+          foto: dataUrl,
+        });
+      } catch {
+        unmatched.push(`${file.name} (gagal diproses)`);
+      }
+    }
+
+    setBulkMatchedPhotos(Array.from(matchedMap.values()));
+    setBulkUnmatchedFiles(unmatched);
+    setBulkPhotoProcessing(false);
+  }
+
+  async function handleSaveBulkPhotos() {
+    if (bulkMatchedPhotos.length === 0) return;
+    setBulkPhotoSaving(true);
+    try {
+      const count = await bulkUpdateSiswaPhotos(
+        bulkMatchedPhotos.map((item) => ({ nis: item.nis, foto: item.foto }))
+      );
+      setBulkPhotoOpen(false);
+      setBulkMatchedPhotos([]);
+      setBulkUnmatchedFiles([]);
+      setNotice({
+        type: 'ok',
+        text: `${count} foto siswa berhasil disimpan ke database.`,
+      });
+    } catch (err: unknown) {
+      setNotice({
+        type: 'err',
+        text: err instanceof Error ? err.message : 'Gagal menyimpan foto siswa massal.',
+      });
+    } finally {
+      setBulkPhotoSaving(false);
     }
   }
 
@@ -360,7 +478,7 @@ export function SiswaPage() {
             className="h-10 px-3 rounded-lg border border-slate-300 text-sm bg-white text-slate-700"
           >
             <option value="">Semua Kelas</option>
-            {KELAS_OPTIONS.map((k) => (
+            {dynamicKelasOptions.map((k) => (
               <option key={k} value={k}>
                 Kelas {k}
               </option>
@@ -417,6 +535,15 @@ export function SiswaPage() {
           >
             <Upload className="w-3.5 h-3.5" />
             <span>{importing ? 'Mengimpor...' : 'Import Excel'}</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={openBulkPhotoModal}
+            className="h-10 px-3.5 rounded-lg border border-indigo-200 bg-indigo-50 hover:bg-indigo-100 text-xs font-semibold text-indigo-800 inline-flex items-center gap-2 cursor-pointer whitespace-nowrap"
+          >
+            <Images className="w-3.5 h-3.5" />
+            <span>Upload Foto Massal</span>
           </button>
 
           <button
@@ -708,17 +835,51 @@ export function SiswaPage() {
                   <label className="block text-xs font-semibold text-slate-700 mb-1">
                     Kelas *
                   </label>
-                  <select
-                    value={form.kelas}
-                    onChange={(e) => setForm({ ...form, kelas: e.target.value })}
-                    className="w-full h-10 px-3 rounded-lg border border-slate-300 text-sm bg-white"
-                  >
-                    {KELAS_OPTIONS.map((k) => (
-                      <option key={k} value={k}>
-                        {k}
-                      </option>
-                    ))}
-                  </select>
+                  {customKelasMode ? (
+                    <div className="flex items-center gap-1.5">
+                      <input
+                        type="text"
+                        required
+                        maxLength={20}
+                        value={form.kelas}
+                        onChange={(e) => setForm({ ...form, kelas: e.target.value })}
+                        placeholder="Mis. X C, XI RPL 1"
+                        className="w-full h-10 px-3 rounded-lg border border-slate-300 text-sm bg-white"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setCustomKelasMode(false);
+                          if (!modalKelasSuggestions.includes(form.kelas)) {
+                            setForm({ ...form, kelas: modalKelasSuggestions[0] || 'X' });
+                          }
+                        }}
+                        className="h-10 px-2.5 rounded-lg border border-slate-300 text-[11px] font-semibold text-slate-600 hover:bg-slate-50 shrink-0 cursor-pointer"
+                      >
+                        Daftar
+                      </button>
+                    </div>
+                  ) : (
+                    <select
+                      value={modalKelasSuggestions.includes(form.kelas) ? form.kelas : '__custom__'}
+                      onChange={(e) => {
+                        if (e.target.value === '__custom__') {
+                          setCustomKelasMode(true);
+                          setForm({ ...form, kelas: '' });
+                        } else {
+                          setForm({ ...form, kelas: e.target.value });
+                        }
+                      }}
+                      className="w-full h-10 px-3 rounded-lg border border-slate-300 text-sm bg-white"
+                    >
+                      {modalKelasSuggestions.map((k) => (
+                        <option key={k} value={k}>
+                          {k}
+                        </option>
+                      ))}
+                      <option value="__custom__">+ Ketik Kelas Lain...</option>
+                    </select>
+                  )}
                 </div>
 
                 <div>
@@ -849,6 +1010,134 @@ export function SiswaPage() {
                 className="h-10 px-4 rounded-lg bg-rose-600 hover:bg-rose-700 text-white text-sm font-semibold cursor-pointer disabled:opacity-60"
               >
                 {deleting ? 'Menghapus...' : `Ya, Hapus (${selectedNis.size})`}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {bulkPhotoOpen && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="w-full max-w-xl bg-white rounded-2xl border border-slate-200 max-h-[90vh] flex flex-col overflow-hidden">
+            <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <div className="w-8 h-8 rounded-lg bg-indigo-50 text-indigo-700 flex items-center justify-center">
+                  <Images className="w-4 h-4" />
+                </div>
+                <h3 className="font-display text-base font-bold text-slate-900">
+                  Upload Foto Siswa Massal (per NIS)
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setBulkPhotoOpen(false)}
+                className="p-1.5 rounded-lg text-slate-500 hover:bg-slate-100 cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-6 overflow-y-auto space-y-4">
+              <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 text-xs text-slate-700 space-y-1.5 leading-relaxed">
+                <p className="font-semibold text-slate-900">
+                  Cara Mudah Upload Foto Setelah Import Excel:
+                </p>
+                <p>
+                  1. Pastikan data siswa sudah masuk lewat <strong>Import Excel</strong> terlebih dahulu.
+                </p>
+                <p>
+                  2. Namai file foto sesuai <strong>NIS siswa</strong> (contoh:{' '}
+                  <code className="font-mono bg-white px-1 rounded border border-slate-200">
+                    24251098.jpg
+                  </code>{' '}
+                  atau{' '}
+                  <code className="font-mono bg-white px-1 rounded border border-slate-200">
+                    24251098_Ahmad.jpg
+                  </code>
+                  ).
+                </p>
+                <p>
+                  3. Klik tombol di bawah lalu blok/pilih semua foto sekaligus (JPG, PNG, WEBP).
+                </p>
+              </div>
+
+              <input
+                ref={bulkPhotoInputRef}
+                type="file"
+                multiple
+                accept="image/jpeg,image/png,image/webp"
+                onChange={handleSelectBulkPhotos}
+                className="hidden"
+              />
+              <button
+                type="button"
+                disabled={bulkPhotoProcessing}
+                onClick={() => bulkPhotoInputRef.current?.click()}
+                className="w-full h-11 rounded-xl border-2 border-dashed border-indigo-300 bg-indigo-50/60 hover:bg-indigo-50 text-xs font-semibold text-indigo-800 inline-flex items-center justify-center gap-2 cursor-pointer disabled:opacity-60"
+              >
+                <Upload className="w-4 h-4" />
+                <span>
+                  {bulkPhotoProcessing
+                    ? 'Memproses & mengecilkan ukuran foto...'
+                    : 'Pilih Banyak File Foto Sekaligus'}
+                </span>
+              </button>
+
+              {bulkMatchedPhotos.length > 0 && (
+                <div className="space-y-2">
+                  <p className="text-xs font-semibold text-emerald-700">
+                    {bulkMatchedPhotos.length} foto cocok dengan NIS siswa:
+                  </p>
+                  <div className="max-h-52 overflow-y-auto divide-y divide-slate-100 border border-slate-200 rounded-xl">
+                    {bulkMatchedPhotos.map((item) => (
+                      <div key={item.nis} className="px-3 py-2 flex items-center gap-3">
+                        <img
+                          src={item.foto}
+                          alt={item.nama_siswa}
+                          className="w-9 h-9 rounded-lg object-cover border border-slate-200 shrink-0"
+                        />
+                        <div className="min-w-0 flex-1">
+                          <p className="text-xs font-semibold text-slate-900 truncate">
+                            {item.nama_siswa}
+                          </p>
+                          <p className="text-[11px] font-mono text-slate-500 truncate">
+                            NIS {item.nis} · {item.filename}
+                          </p>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {bulkUnmatchedFiles.length > 0 && (
+                <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-900 space-y-1">
+                  <p className="font-semibold">
+                    {bulkUnmatchedFiles.length} file tidak cocok dengan NIS mana pun:
+                  </p>
+                  <p className="font-mono text-[11px] break-all">
+                    {bulkUnmatchedFiles.join(', ')}
+                  </p>
+                </div>
+              )}
+            </div>
+
+            <div className="px-6 py-4 border-t border-slate-100 flex items-center justify-end gap-2.5">
+              <button
+                type="button"
+                onClick={() => setBulkPhotoOpen(false)}
+                className="h-10 px-4 rounded-lg border border-slate-300 text-sm font-medium text-slate-700 hover:bg-slate-50 cursor-pointer"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                disabled={bulkPhotoSaving || bulkPhotoProcessing || bulkMatchedPhotos.length === 0}
+                onClick={handleSaveBulkPhotos}
+                className="h-10 px-5 rounded-lg bg-blue-700 hover:bg-blue-800 text-white text-sm font-semibold disabled:opacity-50 cursor-pointer"
+              >
+                {bulkPhotoSaving
+                  ? 'Menyimpan...'
+                  : `Simpan ${bulkMatchedPhotos.length} Foto`}
               </button>
             </div>
           </div>

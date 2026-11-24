@@ -93,6 +93,14 @@ export function RekapPage({ currentUser }: RekapPageProps) {
     loadAbsensi();
   }, [loadAbsensi]);
 
+  const kelasOptions = useMemo(() => {
+    const set = new Set<string>();
+    for (const s of allStudents) {
+      if (s.kelas) set.add(s.kelas);
+    }
+    return Array.from(set).sort((a, b) => a.localeCompare(b, 'id', { numeric: true }));
+  }, [allStudents]);
+
   const filteredStudents = useMemo(() => {
     return allStudents.filter((s) => {
       if (kelas && s.kelas !== kelas) return false;
@@ -277,14 +285,16 @@ export function RekapPage({ currentUser }: RekapPageProps) {
           </div>
 
           <div className="flex flex-wrap items-center gap-2.5">
-            <button
-              type="button"
-              onClick={() => setAlpaModalOpen(true)}
-              className="h-10 px-3.5 rounded-lg border border-rose-300 bg-rose-50 hover:bg-rose-100 text-xs font-semibold text-rose-800 inline-flex items-center gap-2 cursor-pointer whitespace-nowrap"
-            >
-              <CalendarX2 className="w-3.5 h-3.5" />
-              <span>Generate Alpa Otomatis</span>
-            </button>
+            {currentUser.role === 'admin' && (
+              <button
+                type="button"
+                onClick={() => setAlpaModalOpen(true)}
+                className="h-10 px-3.5 rounded-lg border border-rose-300 bg-rose-50 hover:bg-rose-100 text-xs font-semibold text-rose-800 inline-flex items-center gap-2 cursor-pointer whitespace-nowrap"
+              >
+                <CalendarX2 className="w-3.5 h-3.5" />
+                <span>Generate Alpa Otomatis</span>
+              </button>
+            )}
 
             <button
               type="button"
@@ -359,9 +369,11 @@ export function RekapPage({ currentUser }: RekapPageProps) {
             className="h-9 px-3 rounded-lg border border-slate-300 text-xs bg-white text-slate-700"
           >
             <option value="">Semua Kelas</option>
-            <option value="X">Kelas X</option>
-            <option value="XI">Kelas XI</option>
-            <option value="XII">Kelas XII</option>
+            {kelasOptions.map((k) => (
+              <option key={k} value={k}>
+                Kelas {k}
+              </option>
+            ))}
           </select>
 
           <select

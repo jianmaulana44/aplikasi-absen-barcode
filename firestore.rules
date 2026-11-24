@@ -94,7 +94,7 @@ service cloud.firestore {
         && data.nisn is string && data.nisn.size() <= 30
         && data.nama_siswa is string && data.nama_siswa.size() >= 1 && data.nama_siswa.size() <= 120
         && data.jenis_kelamin in ['L', 'P']
-        && data.kelas in ['X', 'XI', 'XII']
+        && data.kelas is string && data.kelas.size() >= 1 && data.kelas.size() <= 20
         && data.jurusan is string && data.jurusan.size() >= 1 && data.jurusan.size() <= 60
         && data.no_hp_ortu is string && data.no_hp_ortu.size() <= 25
         && data.foto is string && data.foto.size() <= 250000
@@ -115,7 +115,7 @@ service cloud.firestore {
         ])
         && isValidId(data.nis) && data.nis.size() <= 30
         && data.nama_siswa is string && data.nama_siswa.size() >= 1 && data.nama_siswa.size() <= 120
-        && data.kelas is string && data.kelas.size() >= 1 && data.kelas.size() <= 10
+        && data.kelas is string && data.kelas.size() >= 1 && data.kelas.size() <= 20
         && data.jurusan is string && data.jurusan.size() >= 1 && data.jurusan.size() <= 60
         && data.foto is string && data.foto.size() <= 250000
         && data.tanggal is string && data.tanggal.size() == 10 && data.tanggal.matches('^\\d{4}-\\d{2}-\\d{2}$')
@@ -126,6 +126,45 @@ service cloud.firestore {
         && data.petugas_piket is string && data.petugas_piket.size() >= 1 && data.petugas_piket.size() <= 120
         && data.recordedByUid == request.auth.uid
         && data.updatedAt == request.time;
+    }
+
+    function isValidWaConfig(data) {
+      return data.keys().hasAll([
+          'enabled', 'notify_masuk', 'notify_pulang',
+          'template_masuk', 'template_pulang', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'enabled', 'notify_masuk', 'notify_pulang',
+          'template_masuk', 'template_pulang', 'updatedAt'
+        ])
+        && data.enabled is bool
+        && data.notify_masuk is bool
+        && data.notify_pulang is bool
+        && data.template_masuk is string && data.template_masuk.size() >= 5 && data.template_masuk.size() <= 1000
+        && data.template_pulang is string && data.template_pulang.size() >= 5 && data.template_pulang.size() <= 1000
+        && data.updatedAt == request.time;
+    }
+
+    function isValidWaLog(data) {
+      return data.keys().hasAll([
+          'nis', 'nama_siswa', 'no_hp_ortu', 'jenis', 'tanggal',
+          'jam', 'status_kirim', 'keterangan', 'petugas', 'recordedByUid', 'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'nis', 'nama_siswa', 'no_hp_ortu', 'jenis', 'tanggal',
+          'jam', 'status_kirim', 'keterangan', 'petugas', 'recordedByUid', 'createdAt'
+        ])
+        && isValidId(data.nis) && data.nis.size() <= 30
+        && data.nama_siswa is string && data.nama_siswa.size() >= 1 && data.nama_siswa.size() <= 120
+        && data.no_hp_ortu is string && data.no_hp_ortu.size() <= 25
+        && data.jenis in ['masuk', 'pulang', 'test']
+        && data.tanggal is string && data.tanggal.size() == 10 && data.tanggal.matches('^\\d{4}-\\d{2}-\\d{2}$')
+        && data.jam is string && data.jam.size() <= 8
+        && data.status_kirim in ['terkirim', 'gagal', 'belum_konfigurasi']
+        && data.keterangan is string && data.keterangan.size() <= 300
+        && data.petugas is string && data.petugas.size() >= 1 && data.petugas.size() <= 120
+        && data.recordedByUid == request.auth.uid
+        && data.createdAt == request.time;
     }
 
     match /test/connection {
@@ -190,6 +229,18 @@ service cloud.firestore {
           'petugas_piket', 'recordedByUid', 'updatedAt'
         ]);
       allow delete: if isValidId(absensiId) && isAdmin();
+    }
+
+    match /wa_config/{configId} {
+      allow get: if isValidId(configId) && configId == 'main' && isStaff();
+      allow create, update: if isValidId(configId) && configId == 'main' && isAdmin() && isValidWaConfig(incoming());
+    }
+
+    match /wa_logs/{logId} {
+      allow get: if isValidId(logId) && isStaff();
+      allow list: if isStaff();
+      allow create: if isValidId(logId) && isStaff() && isValidWaLog(incoming());
+      allow delete: if isValidId(logId) && isAdmin();
     }
   }
 }

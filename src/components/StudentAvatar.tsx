@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 
 interface StudentAvatarProps {
   src?: string;
@@ -8,6 +8,10 @@ interface StudentAvatarProps {
 
 export function StudentAvatar({ src, name, className = 'w-10 h-10' }: StudentAvatarProps) {
   const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    setFailed(false);
+  }, [src]);
 
   const initials = name
     .split(' ')

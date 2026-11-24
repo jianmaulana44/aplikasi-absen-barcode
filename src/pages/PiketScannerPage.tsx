@@ -6,7 +6,10 @@ import {
   CameraOff,
   CheckCircle2,
   ClipboardList,
+  FileSpreadsheet,
   LogOut,
+  MessageCircle,
+  QrCode,
   Search,
   Send,
   UserCheck,
@@ -15,17 +18,21 @@ import {
 } from 'lucide-react';
 import {
   DEFAULT_PENGATURAN,
+  DEFAULT_WA_CONFIG,
   getJakartaNow,
   processQrScanFirestore,
   submitManualAttendanceFirestore,
   subscribeSiswa,
   subscribeTodayAbsensi,
+  subscribeWaConfig,
 } from '../lib/firestoreService';
-import { AbsensiLogItem, AuthUser, Pengaturan, Siswa } from '../types';
+import { triggerParentWhatsAppNotification } from '../lib/whatsappService';
+import { AbsensiLogItem, AuthUser, Pengaturan, Siswa, WaConfig, WaSendResult } from '../types';
 import { playErrorBeep, playSuccessBeep } from '../utils/audio';
 import { StudentAvatar } from '../components/StudentAvatar';
 import { StatusLabel } from '../components/StatusBadge';
 import { PWAInstallButton } from '../components/PWAInstallButton';
+import { RekapPage } from './RekapPage';
 
 interface PiketScannerPageProps {
   user: AuthUser;
@@ -44,6 +51,8 @@ interface ScanFeedback {
   status?: string;
   jamScan?: string;
   actionMode?: string;
+  waStatus?: 'sending' | 'done';
+  waResult?: WaSendResult | null;
 }
 
 export function PiketScannerPage({
@@ -55,6 +64,7 @@ export function PiketScannerPage({
   const { tanggal } = useMemo(() => getJakartaNow(), []);
   const activeSettings = pengaturan || DEFAULT_PENGATURAN;
 
+  const [activeTab, setActiveTab] = useState<'scanner' | 'rekap'>('scanner');
   const [mode, setMode] = useState<ScanMode>('auto');
   const [cameraActive, setCameraActive] = useState(false);
   const [cameraError, setCameraError] = useState('');
@@ -64,6 +74,12 @@ export function PiketScannerPage({
   const [clockStr, setClockStr] = useState('');
   const [allStudents, setAllStudents] = useState<Siswa[]>([]);
   const [todayLogs, setTodayLogs] = useState<AbsensiLogItem[]>([]);
+  const [waConfig, setWaConfig] = useState<WaConfig>(DEFAULT_WA_CONFIG);
+  const [lastWaNotice, setLastWaNotice] = useState<{
+    siswaNama: string;
+    eventType: 'masuk' | 'pulang';
+    result: WaSendResult;
+  } | null>(null);
 
   const [feedback, setFeedback] = useState<ScanFeedback | null>(null);
 
@@ -77,6 +93,12 @@ export function PiketScannerPage({
 
   const scannerRef = useRef<Html5Qrcode | null>(null);
   const lastScanRef = useRef<{ code: string; ts: number }>({ code: '', ts: 0 });
+  const feedbackRunIdRef = useRef(0);
+  const processingRef = useRef(false);
+  const waConfigRef = useRef<WaConfig>(waConfig);
+  waConfigRef.current = waConfig;
+  const activeSettingsRef = useRef<Pengaturan>(activeSettings);
+  activeSettingsRef.current = activeSettings;
   const modeRef = useRef<ScanMode>(mode);
   modeRef.current = mode;
 
@@ -103,9 +125,14 @@ export function PiketScannerPage({
     const unsubAbs = subscribeTodayAbsensi(tanggal, (rows) => {
       setTodayLogs(rows);
     });
+    const unsubWa = subscribeWaConfig(
+      (cfg) => setWaConfig(cfg),
+      () => {}
+    );
     return () => {
       unsubSiswa();
       unsubAbs();
+      unsubWa();
     };
   }, [tanggal]);
 
@@ -136,7 +163,7 @@ export function PiketScannerPage({
   const processScanCode = useCallback(
     async (nisRaw: string) => {
       const nis = nisRaw.trim();
-      if (!nis || processing) return;
+      if (!nis || processingRef.current) return;
 
       const now = Date.now();
       if (lastScanRef.current.code === nis && now - lastScanRef.current.ts < 3000) {
@@ -144,6 +171,10 @@ export function PiketScannerPage({
       }
       lastScanRef.current = { code: nis, ts: now };
 
+      const currentWaConfig = waConfigRef.current;
+      const currentSettings = activeSettingsRef.current;
+
+      processingRef.current = true;
       setProcessing(true);
       try {
         const res = await processQrScanFirestore({
@@ -151,7 +182,7 @@ export function PiketScannerPage({
           mode: modeRef.current,
           petugasName: user.nama_lengkap,
           uid: user.uid,
-          pengaturan: activeSettings,
+          pengaturan: currentSettings,
         });
 
         if (res.success) {
@@ -159,7 +190,48 @@ export function PiketScannerPage({
         } else {
           playErrorBeep();
         }
-        setFeedback(res);
+
+        const shouldSendWa =
+          res.success &&
+          res.siswa &&
+          currentWaConfig.enabled &&
+          ((res.code === 'OK_IN' || res.code === 'OK_LATE')
+            ? currentWaConfig.notify_masuk
+            : res.code === 'OK_OUT'
+            ? currentWaConfig.notify_pulang
+            : false);
+
+        const runId = ++feedbackRunIdRef.current;
+        setFeedback(
+          shouldSendWa ? { ...res, waStatus: 'sending', waResult: null } : res
+        );
+
+        if (shouldSendWa && res.siswa) {
+          const eventType = res.code === 'OK_OUT' ? 'pulang' : 'masuk';
+          const siswaTarget = res.siswa;
+          triggerParentWhatsAppNotification({
+            siswa: siswaTarget,
+            eventType,
+            status: res.status || (eventType === 'pulang' ? 'Pulang' : 'Hadir'),
+            jamScan: res.jamScan || '',
+            pengaturan: currentSettings,
+            waConfig: currentWaConfig,
+            petugasName: user.nama_lengkap,
+            uid: user.uid,
+          }).then((waRes) => {
+            if (waRes) {
+              setLastWaNotice({
+                siswaNama: siswaTarget.nama_siswa,
+                eventType,
+                result: waRes,
+              });
+            }
+            if (feedbackRunIdRef.current !== runId) return;
+            setFeedback((prev) =>
+              prev ? { ...prev, waStatus: 'done', waResult: waRes } : prev
+            );
+          });
+        }
       } catch (err: unknown) {
         playErrorBeep();
         setFeedback({
@@ -168,15 +240,22 @@ export function PiketScannerPage({
           message: err instanceof Error ? err.message : 'Gagal memproses scan.',
         });
       } finally {
+        processingRef.current = false;
         setProcessing(false);
       }
     },
-    [processing, user.nama_lengkap, user.uid, activeSettings]
+    [user.nama_lengkap, user.uid]
   );
+
+  const processScanCodeRef = useRef(processScanCode);
+  processScanCodeRef.current = processScanCode;
 
   useEffect(() => {
     if (!feedback) return;
-    const t = setTimeout(() => setFeedback(null), 3500);
+    if (feedback.waStatus === 'sending') return;
+    const delay =
+      feedback.waResult && !feedback.waResult.sent ? 7000 : 4000;
+    const t = setTimeout(() => setFeedback(null), delay);
     return () => clearTimeout(t);
   }, [feedback]);
 
@@ -208,7 +287,7 @@ export function PiketScannerPage({
           aspectRatio: 1,
         },
         (decodedText) => {
-          processScanCode(decodedText);
+          processScanCodeRef.current(decodedText);
         },
         () => {}
       );
@@ -221,7 +300,7 @@ export function PiketScannerPage({
       );
       setCameraActive(false);
     }
-  }, [processScanCode]);
+  }, []);
 
   useEffect(() => {
     return () => {
@@ -251,17 +330,51 @@ export function PiketScannerPage({
         uid: user.uid,
       });
       playSuccessBeep(manualStatus === 'Terlambat');
+      const targetStudent = selectedStudent;
+      const shouldSendWa =
+        waConfig.enabled &&
+        waConfig.notify_masuk &&
+        (manualStatus === 'Hadir' || manualStatus === 'Terlambat');
+
       setManualModalOpen(false);
       setSelectedStudent(null);
       setManualNote('');
+      const runId = ++feedbackRunIdRef.current;
       setFeedback({
         success: true,
         code: 'MANUAL_OK',
         message: res.message,
-        siswa: selectedStudent,
+        siswa: targetStudent,
         status: manualStatus,
         jamScan: res.jamScan,
+        waStatus: shouldSendWa ? 'sending' : undefined,
+        waResult: null,
       });
+
+      if (shouldSendWa) {
+        triggerParentWhatsAppNotification({
+          siswa: targetStudent,
+          eventType: 'masuk',
+          status: manualStatus,
+          jamScan: res.jamScan,
+          pengaturan: activeSettingsRef.current,
+          waConfig: waConfigRef.current,
+          petugasName: user.nama_lengkap,
+          uid: user.uid,
+        }).then((waRes) => {
+          if (waRes) {
+            setLastWaNotice({
+              siswaNama: targetStudent.nama_siswa,
+              eventType: 'masuk',
+              result: waRes,
+            });
+          }
+          if (feedbackRunIdRef.current !== runId) return;
+          setFeedback((prev) =>
+            prev ? { ...prev, waStatus: 'done', waResult: waRes } : prev
+          );
+        });
+      }
     } catch (err: unknown) {
       playErrorBeep();
       setFeedback({
@@ -292,6 +405,14 @@ export function PiketScannerPage({
               <ArrowLeft className="w-5 h-5" />
             </button>
           )}
+          <div className="w-8 h-8 rounded-lg bg-white p-0.5 shrink-0 flex items-center justify-center overflow-hidden">
+            <img
+              src={activeSettings.logo || DEFAULT_PENGATURAN.logo}
+              alt={activeSettings.nama_sekolah}
+              referrerPolicy="no-referrer"
+              className="w-full h-full object-contain"
+            />
+          </div>
           <div className="min-w-0">
             <p className="font-display text-sm font-bold truncate">
               {activeSettings.nama_sekolah}
@@ -321,7 +442,45 @@ export function PiketScannerPage({
         </div>
       </header>
 
-      <main className="flex-1 max-w-6xl w-full mx-auto p-4 sm:p-6 grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+      {/* Sub-navigation: Scanner Absensi & Rekap Kehadiran */}
+      <div className="bg-white border-b border-slate-200 px-4">
+        <div className="max-w-[1400px] mx-auto flex items-center gap-2 py-2">
+          <button
+            type="button"
+            onClick={() => setActiveTab('scanner')}
+            className={`min-h-[40px] px-4 rounded-xl text-xs sm:text-sm font-semibold inline-flex items-center gap-2 transition-colors cursor-pointer whitespace-nowrap ${
+              activeTab === 'scanner'
+                ? 'bg-slate-900 text-white'
+                : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
+            }`}
+          >
+            <QrCode className="w-4 h-4 shrink-0" />
+            <span>Scanner Absensi</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              stopCamera();
+              setActiveTab('rekap');
+            }}
+            className={`min-h-[40px] px-4 rounded-xl text-xs sm:text-sm font-semibold inline-flex items-center gap-2 transition-colors cursor-pointer whitespace-nowrap ${
+              activeTab === 'rekap'
+                ? 'bg-blue-700 text-white'
+                : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
+            }`}
+          >
+            <FileSpreadsheet className="w-4 h-4 shrink-0" />
+            <span>Rekap & Download</span>
+          </button>
+        </div>
+      </div>
+
+      {activeTab === 'rekap' ? (
+        <main className="flex-1 max-w-[1400px] w-full mx-auto p-4 sm:p-6">
+          <RekapPage currentUser={user} />
+        </main>
+      ) : (
+        <main className="flex-1 max-w-6xl w-full mx-auto p-4 sm:p-6 grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
         <section className="lg:col-span-7 bg-white border border-slate-200 rounded-2xl p-4 sm:p-6 space-y-5">
           <div>
             <div className="flex items-center justify-between gap-2 mb-2">
@@ -425,6 +584,34 @@ export function PiketScannerPage({
               <ClipboardList className="w-4 h-4 shrink-0" />
               <span>Darurat Pagi: Input Tanpa Kartu / Izin / Sakit</span>
             </button>
+
+            {lastWaNotice && (
+              <div
+                className={`px-3.5 py-2.5 rounded-xl border text-xs flex flex-wrap items-center justify-between gap-2 ${
+                  lastWaNotice.result.sent
+                    ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                    : 'bg-amber-50 border-amber-200 text-amber-900'
+                }`}
+              >
+                <div className="flex items-center gap-2 min-w-0">
+                  <MessageCircle className="w-4 h-4 shrink-0" />
+                  <span className="truncate">
+                    <strong>WA {lastWaNotice.eventType === 'pulang' ? 'Pulang' : 'Masuk'} ({lastWaNotice.siswaNama}):</strong>{' '}
+                    {lastWaNotice.result.detail}
+                  </span>
+                </div>
+                {!lastWaNotice.result.sent && lastWaNotice.result.fallbackUrl && (
+                  <a
+                    href={lastWaNotice.result.fallbackUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="px-2.5 py-1 rounded-lg bg-emerald-700 text-white font-semibold shrink-0 hover:bg-emerald-800"
+                  >
+                    Kirim Manual
+                  </a>
+                )}
+              </div>
+            )}
           </div>
         </section>
 
@@ -492,6 +679,7 @@ export function PiketScannerPage({
           </div>
         </section>
       </main>
+      )}
 
       {feedback && (
         <div
@@ -546,6 +734,39 @@ export function PiketScannerPage({
                 </p>
               )}
             </div>
+
+            {feedback.waStatus === 'sending' && (
+              <div className="px-3 py-2 rounded-xl bg-blue-50 border border-blue-200 text-xs text-blue-800 flex items-center justify-center gap-2">
+                <div className="w-3.5 h-3.5 rounded-full border-2 border-blue-300 border-t-blue-700 animate-spin shrink-0" />
+                <span>Mengirim notifikasi WhatsApp ke orang tua...</span>
+              </div>
+            )}
+
+            {feedback.waStatus === 'done' && feedback.waResult && (
+              <div
+                className={`px-3 py-2.5 rounded-xl border text-xs space-y-2 ${
+                  feedback.waResult.sent
+                    ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                    : 'bg-amber-50 border-amber-200 text-amber-900'
+                }`}
+              >
+                <p className="font-medium flex items-center justify-center gap-1.5">
+                  <MessageCircle className="w-3.5 h-3.5 shrink-0" />
+                  <span>{feedback.waResult.detail}</span>
+                </p>
+                {!feedback.waResult.sent && feedback.waResult.fallbackUrl && (
+                  <a
+                    href={feedback.waResult.fallbackUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="w-full min-h-[36px] px-3 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold inline-flex items-center justify-center gap-1.5"
+                  >
+                    <MessageCircle className="w-3.5 h-3.5" />
+                    <span>Kirim via WhatsApp ({feedback.waResult.normalizedPhone})</span>
+                  </a>
+                )}
+              </div>
+            )}
 
             <button
               type="button"

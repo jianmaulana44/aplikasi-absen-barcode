@@ -5,9 +5,11 @@ import {
   Copy,
   Database,
   ExternalLink,
+  MessageCircle,
   MonitorDown,
   Plus,
   Save,
+  Send,
   Smartphone,
   Trash2,
   Upload,
@@ -17,14 +19,20 @@ import {
   addStaffRole,
   BOOTSTRAPPED_ADMIN_EMAIL,
   DEFAULT_PENGATURAN,
+  DEFAULT_WA_CONFIG,
   removeStaffRole,
   resizeImageFileToDataUrl,
   savePengaturan,
+  saveWaConfig,
+  subscribeRecentWaLogs,
   subscribeStaffRoles,
+  subscribeWaConfig,
 } from '../lib/firestoreService';
-import { AuthUser, Pengaturan, StaffMember } from '../types';
+import { AuthUser, Pengaturan, StaffMember, WaConfig, WaLogItem, WaSendResult } from '../types';
 import { usePWAInstall } from '../hooks/usePWAInstall';
 import { downloadMysqlSchemaFile, getPwabuilderUrl } from '../utils/packageExporter';
+import { fetchWaGatewayStatus, sendWaTestMessage } from '../lib/whatsappService';
+import { auth } from '../lib/firebase';
 
 interface PengaturanPageProps {
   currentUser: AuthUser;
@@ -32,8 +40,19 @@ interface PengaturanPageProps {
 }
 
 export function PengaturanPage({ currentUser, pengaturan }: PengaturanPageProps) {
-  const [tab, setTab] = useState<'sekolah' | 'akun' | 'distribusi'>('sekolah');
+  const [tab, setTab] = useState<'sekolah' | 'whatsapp' | 'akun' | 'distribusi'>('sekolah');
   const [form, setForm] = useState<Pengaturan>(pengaturan || DEFAULT_PENGATURAN);
+  const [waForm, setWaForm] = useState<WaConfig>(DEFAULT_WA_CONFIG);
+  const [waLogs, setWaLogs] = useState<WaLogItem[]>([]);
+  const [waGatewayStatus, setWaGatewayStatus] = useState<{
+    configured: boolean;
+    provider: string;
+  } | null>(null);
+  const [savingWa, setSavingWa] = useState(false);
+  const [testPhone, setTestPhone] = useState('');
+  const [testingWa, setTestingWa] = useState(false);
+  const [testResult, setTestResult] = useState<WaSendResult | null>(null);
+
   const [staffList, setStaffList] = useState<StaffMember[]>([]);
   const [newStaff, setNewStaff] = useState({
     nama_lengkap: '',
@@ -59,7 +78,18 @@ export function PengaturanPage({ currentUser, pengaturan }: PengaturanPageProps)
     const unsub = subscribeStaffRoles((rows) => {
       setStaffList(rows);
     });
-    return () => unsub();
+    const unsubWa = subscribeWaConfig((cfg) => {
+      setWaForm(cfg);
+    });
+    const unsubWaLogs = subscribeRecentWaLogs((rows) => {
+      setWaLogs(rows);
+    });
+    fetchWaGatewayStatus().then((st) => setWaGatewayStatus(st));
+    return () => {
+      unsub();
+      unsubWa();
+      unsubWaLogs();
+    };
   }, []);
 
   useEffect(() => {
@@ -92,6 +122,13 @@ export function PengaturanPage({ currentUser, pengaturan }: PengaturanPageProps)
     setNotice(null);
     try {
       await savePengaturan(form);
+      const idToken = await auth.currentUser?.getIdToken().catch(() => null);
+      if (idToken) {
+        fetch('/api/pengaturan/icon-cache-reset', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${idToken}` },
+        }).catch(() => {});
+      }
       setNotice({ type: 'ok', text: 'Pengaturan sekolah berhasil disimpan.' });
     } catch (err: unknown) {
       setNotice({
@@ -157,6 +194,47 @@ export function PengaturanPage({ currentUser, pengaturan }: PengaturanPageProps)
     setTimeout(() => setCopiedUrl(false), 2000);
   }
 
+  async function handleSaveWaConfig(e: FormEvent) {
+    e.preventDefault();
+    setSavingWa(true);
+    setNotice(null);
+    try {
+      await saveWaConfig(waForm);
+      setNotice({ type: 'ok', text: 'Pengaturan notifikasi WhatsApp berhasil disimpan.' });
+    } catch (err: unknown) {
+      setNotice({
+        type: 'err',
+        text: err instanceof Error ? err.message : 'Gagal menyimpan pengaturan WhatsApp.',
+      });
+    } finally {
+      setSavingWa(false);
+    }
+  }
+
+  async function handleTestWa(e: FormEvent) {
+    e.preventDefault();
+    setTestingWa(true);
+    setTestResult(null);
+    setNotice(null);
+    try {
+      const sampleMsg = `Uji Coba Notifikasi Absensi *${form.nama_sekolah}*.\nPesan otomatis WhatsApp untuk orang tua siswa siap digunakan.`;
+      const res = await sendWaTestMessage({
+        phone: testPhone,
+        message: sampleMsg,
+        petugasName: currentUser.nama_lengkap,
+        uid: currentUser.uid,
+      });
+      setTestResult(res);
+    } catch (err: unknown) {
+      setNotice({
+        type: 'err',
+        text: err instanceof Error ? err.message : 'Gagal menguji pengiriman WhatsApp.',
+      });
+    } finally {
+      setTestingWa(false);
+    }
+  }
+
   return (
     <div className="space-y-5">
       {notice && (
@@ -181,6 +259,7 @@ export function PengaturanPage({ currentUser, pengaturan }: PengaturanPageProps)
       <div className="inline-flex flex-wrap p-1 bg-slate-200/70 rounded-lg">
         {[
           { id: 'sekolah' as const, label: 'Identitas & Jam Sekolah' },
+          { id: 'whatsapp' as const, label: 'Notifikasi WhatsApp' },
           { id: 'akun' as const, label: 'Akun Guru Piket & Admin' },
           { id: 'distribusi' as const, label: 'Install Desktop, APK & Ekspor MySQL' },
         ].map((item) => (
@@ -337,6 +416,270 @@ export function PengaturanPage({ currentUser, pengaturan }: PengaturanPageProps)
             </button>
           </div>
         </form>
+      )}
+
+      {tab === 'whatsapp' && (
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+          <form
+            onSubmit={handleSaveWaConfig}
+            className="lg:col-span-7 bg-white border border-slate-200 rounded-xl p-6 space-y-5"
+          >
+            <div className="flex items-start justify-between gap-4 pb-4 border-b border-slate-100">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl bg-emerald-50 text-emerald-700 flex items-center justify-center shrink-0">
+                  <MessageCircle className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="font-display text-base font-bold text-slate-900">
+                    Notifikasi WhatsApp Orang Tua Otomatis
+                  </h3>
+                  <p className="text-xs text-slate-500">
+                    Kirim pesan otomatis ke nomor HP orang tua saat siswa scan datang atau pulang
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            {waGatewayStatus && (
+              <div
+                className={`p-3.5 rounded-xl border text-xs leading-relaxed ${
+                  waGatewayStatus.configured
+                    ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                    : 'bg-amber-50 border-amber-200 text-amber-900'
+                }`}
+              >
+                {waGatewayStatus.configured ? (
+                  <p>
+                    <strong>Gateway Server Aktif ({waGatewayStatus.provider}):</strong> Pesan
+                    WhatsApp akan langsung dikirim otomatis di latar belakang setiap kali scan
+                    datang/pulang berhasil.
+                  </p>
+                ) : (
+                  <div className="space-y-1">
+                    <p>
+                      <strong>Mode Tombol WhatsApp Manual (Gateway Server Belum Diatur):</strong>{' '}
+                      Untuk kirim otomatis penuh tanpa klik apa-apa, tambahkan{' '}
+                      <code className="font-mono bg-white px-1 rounded">WHATSAPP_API_TOKEN</code>{' '}
+                      (mis. Fonnte/Wablas/Meta) di menu <strong>Settings → Secrets</strong> pada
+                      proyek ini.
+                    </p>
+                    <p>
+                      Selama token gateway belum dipasang, guru piket tetap mendapat tombol cepat{' '}
+                      <strong>Kirim via WhatsApp</strong> setelah scan.
+                    </p>
+                  </div>
+                )}
+              </div>
+            )}
+
+            <div className="space-y-3">
+              <label className="flex items-center justify-between gap-3 p-3.5 rounded-xl border border-slate-200 cursor-pointer hover:bg-slate-50">
+                <div>
+                  <p className="text-sm font-semibold text-slate-900">
+                    Aktifkan Notifikasi WhatsApp
+                  </p>
+                  <p className="text-xs text-slate-500">
+                    Jalankan pengiriman pesan ke nomor orang tua yang tersimpan di data siswa
+                  </p>
+                </div>
+                <input
+                  type="checkbox"
+                  checked={waForm.enabled}
+                  onChange={(e) => setWaForm({ ...waForm, enabled: e.target.checked })}
+                  className="w-5 h-5 rounded accent-emerald-700 cursor-pointer"
+                />
+              </label>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <label className="flex items-center gap-2.5 p-3 rounded-xl border border-slate-200 cursor-pointer hover:bg-slate-50">
+                  <input
+                    type="checkbox"
+                    checked={waForm.notify_masuk}
+                    onChange={(e) => setWaForm({ ...waForm, notify_masuk: e.target.checked })}
+                    className="w-4 h-4 rounded accent-blue-700 cursor-pointer"
+                  />
+                  <span className="text-xs font-semibold text-slate-800">
+                    Kirim saat Absen Datang
+                  </span>
+                </label>
+
+                <label className="flex items-center gap-2.5 p-3 rounded-xl border border-slate-200 cursor-pointer hover:bg-slate-50">
+                  <input
+                    type="checkbox"
+                    checked={waForm.notify_pulang}
+                    onChange={(e) => setWaForm({ ...waForm, notify_pulang: e.target.checked })}
+                    className="w-4 h-4 rounded accent-blue-700 cursor-pointer"
+                  />
+                  <span className="text-xs font-semibold text-slate-800">
+                    Kirim saat Absen Pulang
+                  </span>
+                </label>
+              </div>
+            </div>
+
+            <div className="space-y-3">
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Template Pesan Absen Datang
+                </label>
+                <textarea
+                  rows={6}
+                  required
+                  value={waForm.template_masuk}
+                  onChange={(e) => setWaForm({ ...waForm, template_masuk: e.target.value })}
+                  className="w-full p-3 rounded-lg border border-slate-300 text-xs font-mono leading-relaxed"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Template Pesan Absen Pulang
+                </label>
+                <textarea
+                  rows={6}
+                  required
+                  value={waForm.template_pulang}
+                  onChange={(e) => setWaForm({ ...waForm, template_pulang: e.target.value })}
+                  className="w-full p-3 rounded-lg border border-slate-300 text-xs font-mono leading-relaxed"
+                />
+              </div>
+
+              <p className="text-[11px] text-slate-500 leading-relaxed">
+                Variabel otomatis:{' '}
+                <code className="font-mono bg-slate-100 px-1 rounded">{'{nama_siswa}'}</code>,{' '}
+                <code className="font-mono bg-slate-100 px-1 rounded">{'{nis}'}</code>,{' '}
+                <code className="font-mono bg-slate-100 px-1 rounded">{'{kelas}'}</code>,{' '}
+                <code className="font-mono bg-slate-100 px-1 rounded">{'{jurusan}'}</code>,{' '}
+                <code className="font-mono bg-slate-100 px-1 rounded">{'{status}'}</code>,{' '}
+                <code className="font-mono bg-slate-100 px-1 rounded">{'{jam}'}</code>,{' '}
+                <code className="font-mono bg-slate-100 px-1 rounded">{'{tanggal}'}</code>,{' '}
+                <code className="font-mono bg-slate-100 px-1 rounded">{'{nama_sekolah}'}</code>
+              </p>
+            </div>
+
+            <div className="flex items-center justify-between gap-3 pt-2">
+              <button
+                type="button"
+                onClick={() => setWaForm(DEFAULT_WA_CONFIG)}
+                className="h-10 px-4 rounded-lg border border-slate-300 hover:bg-slate-50 text-xs font-semibold text-slate-700 cursor-pointer"
+              >
+                Reset Template Default
+              </button>
+              <button
+                type="submit"
+                disabled={savingWa}
+                className="h-10 px-5 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-sm font-semibold inline-flex items-center gap-2 cursor-pointer disabled:opacity-60"
+              >
+                <Save className="w-4 h-4" />
+                <span>{savingWa ? 'Menyimpan...' : 'Simpan Pengaturan WA'}</span>
+              </button>
+            </div>
+          </form>
+
+          <div className="lg:col-span-5 space-y-5">
+            <form
+              onSubmit={handleTestWa}
+              className="bg-white border border-slate-200 rounded-xl p-5 space-y-3"
+            >
+              <h3 className="font-display text-sm font-bold text-slate-900">
+                Uji Coba Kirim WhatsApp
+              </h3>
+              <p className="text-xs text-slate-500">
+                Masukkan nomor WhatsApp Anda (mis. 081234567890) untuk menguji pengiriman pesan.
+              </p>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  required
+                  value={testPhone}
+                  onChange={(e) => setTestPhone(e.target.value)}
+                  placeholder="0812xxxxxxxx"
+                  className="flex-1 h-10 px-3 rounded-lg border border-slate-300 text-sm font-mono"
+                />
+                <button
+                  type="submit"
+                  disabled={testingWa}
+                  className="h-10 px-4 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-60 shrink-0"
+                >
+                  <Send className="w-3.5 h-3.5" />
+                  <span>{testingWa ? 'Mengirim...' : 'Uji Kirim'}</span>
+                </button>
+              </div>
+              {testResult && (
+                <div
+                  className={`p-3 rounded-lg border text-xs space-y-2 ${
+                    testResult.sent
+                      ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                      : 'bg-amber-50 border-amber-200 text-amber-900'
+                  }`}
+                >
+                  <p>{testResult.detail}</p>
+                  {!testResult.sent && testResult.fallbackUrl && (
+                    <a
+                      href={testResult.fallbackUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-emerald-700 text-white font-semibold hover:bg-emerald-800"
+                    >
+                      <MessageCircle className="w-3.5 h-3.5" />
+                      <span>Coba Buka di WhatsApp Web</span>
+                    </a>
+                  )}
+                </div>
+              )}
+            </form>
+
+            <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+              <div className="px-5 py-3.5 border-b border-slate-200 flex items-center justify-between">
+                <h3 className="font-display text-sm font-bold text-slate-900">
+                  Riwayat Notifikasi Terakhir
+                </h3>
+                <span className="text-xs font-mono tabular-nums text-slate-500">
+                  {waLogs.length} log
+                </span>
+              </div>
+              {waLogs.length === 0 ? (
+                <div className="p-6 text-center text-xs text-slate-500">
+                  Belum ada riwayat pengiriman notifikasi WhatsApp.
+                </div>
+              ) : (
+                <div className="divide-y divide-slate-100 max-h-[380px] overflow-y-auto">
+                  {waLogs.map((log) => (
+                    <div key={log.id} className="px-4 py-3 space-y-1">
+                      <div className="flex items-center justify-between gap-2">
+                        <p className="text-xs font-semibold text-slate-900 truncate">
+                          {log.nama_siswa}{' '}
+                          <span className="font-normal text-slate-500 uppercase">
+                            ({log.jenis})
+                          </span>
+                        </p>
+                        <span
+                          className={`px-2 py-0.5 rounded text-[10px] font-semibold shrink-0 ${
+                            log.status_kirim === 'terkirim'
+                              ? 'bg-emerald-100 text-emerald-800'
+                              : log.status_kirim === 'belum_konfigurasi'
+                              ? 'bg-amber-100 text-amber-800'
+                              : 'bg-rose-100 text-rose-800'
+                          }`}
+                        >
+                          {log.status_kirim === 'terkirim'
+                            ? 'Terkirim'
+                            : log.status_kirim === 'belum_konfigurasi'
+                            ? 'Perlu Token WA'
+                            : 'Gagal'}
+                        </span>
+                      </div>
+                      <p className="text-[11px] font-mono text-slate-500">
+                        {log.no_hp_ortu || 'No HP kosong'} · {log.tanggal} {log.jam}
+                      </p>
+                      <p className="text-[11px] text-slate-600 line-clamp-2">{log.keterangan}</p>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
       )}
 
       {tab === 'akun' && (
